@@ -15,6 +15,13 @@ from fastapi.staticfiles import StaticFiles
 
 GAMMA = "https://gamma-api.polymarket.com"
 CLOB = "https://clob.polymarket.com"
+# Binance may be geo-blocked; CoinGecko used as primary for spot prices
+BINANCE_URLS = [
+    "https://api.binance.com",
+    "https://data-api.binance.vision",
+]
+SPOT_SYMBOLS = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "MATICUSDT", "LINKUSDT"]
+COINGECKO_IDS = {"btcusdt": "bitcoin", "ethusdt": "ethereum", "solusdt": "solana", "maticusdt": "matic-network", "linkusdt": "chainlink"}
 
 app = FastAPI(title="Polymarket Crypto 5-Min Dashboard")
 app.mount("/static", StaticFiles(directory="static"), name="static")
@@ -149,6 +156,26 @@ async def _fetch_5m_markets() -> List[Dict]:
 async def get_markets_5m():
     """5-min crypto prediction markets with CLOB token IDs for WebSocket subscription."""
     return await _fetch_5m_markets()
+
+
+@app.get("/api/spot-prices")
+async def get_spot_prices():
+    """Fetch spot prices from CoinGecko (works globally; Binance may be geo-blocked)."""
+    out = {}
+    ids = ",".join(COINGECKO_IDS.values())
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            r = await client.get("https://api.coingecko.com/api/v3/simple/price", params={"ids": ids, "vs_currencies": "usd"})
+            r.raise_for_status()
+            data = r.json()
+        ts = int(time.time() * 1000)
+        for sym, cg_id in COINGECKO_IDS.items():
+            p = data.get(cg_id, {}).get("usd")
+            if p is not None:
+                out[sym] = {"value": float(p), "timestamp": ts}
+    except Exception:
+        pass
+    return out
 
 
 @app.get("/api/clob/{condition_id}")

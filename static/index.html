@@ -22,18 +22,73 @@
     .scrollbar-thin::-webkit-scrollbar { width: 6px; }
     .scrollbar-thin::-webkit-scrollbar-track { background: transparent; }
     .scrollbar-thin::-webkit-scrollbar-thumb { background: rgba(124,110,244,0.3); border-radius: 3px; }
+    .spin { animation: spin 0.8s linear infinite; }
+    @keyframes spin { to { transform: rotate(360deg); } }
   </style>
 </head>
 <body class="min-h-screen overflow-x-hidden">
-  <div id="root"></div>
+  <div id="root">
+    <div style="display:flex;align-items:center;justify-content:center;min-height:100vh;color:#e8e8f0;font-family:sans-serif">
+      Loading...
+    </div>
+  </div>
 
   <script>
-    const { useState, useEffect, useRef, useCallback } = React;
+    const { useState, useEffect, useRef, useCallback, Component } = React;
     const { createElement: h } = React;
+
+    class ErrorBoundary extends Component {
+      state = { err: null };
+      static getDerivedStateFromError(err) { return { err: err }; }
+      componentDidCatch(err, info) { console.error(err, info); }
+      render() {
+        if (this.state.err) {
+          return h('div', { style: { padding: '2rem', color: '#ff3355', fontFamily: 'sans-serif', maxWidth: 500, margin: '2rem auto' } },
+            h('h2', null, 'Something went wrong'),
+            h('pre', { style: { fontSize: 12, overflow: 'auto' } }, this.state.err.message || String(this.state.err)));
+        }
+        return this.props.children;
+      }
+    }
     const API = window.location.origin;
-    const RTDS_WS = 'wss://ws-live-data.polymarket.com';
     const CLOB_WS = 'wss://ws-subscriptions-clob.polymarket.com/ws/market';
+    const KRAKEN_SPOT_WS = 'wss://ws.kraken.com/v2';
     const SPOT_SYMBOLS = ['btcusdt','ethusdt','solusdt','maticusdt','linkusdt'];
+    const KRAKEN_PAIRS = ['BTC/USD','ETH/USD','SOL/USD','MATIC/USD','LINK/USD'];
+
+    function useSpotPricesRest(setSpotPrices) {
+      useEffect(function() {
+        var mounted = true;
+        function poll() {
+          if (!mounted) return;
+          fetch(API + '/api/spot-prices').then(function(r) {
+            if (!r.ok || !mounted) return;
+            return r.json();
+          }).then(function(data) {
+            if (!data || !mounted) return;
+            setSpotPrices(function(prev) {
+              var next = {};
+              for (var k in prev) next[k] = prev[k];
+              for (var sym in data) {
+                var d = data[sym];
+                var val = d && (d.value != null ? d.value : d);
+                if (val == null) continue;
+                val = parseFloat(val);
+                if (isNaN(val)) continue;
+                var old = prev[sym];
+                var history = (old && old.history ? old.history.concat(old.value) : []).filter(function(v){ return v != null; }).slice(-29);
+                var change = old && old.value != null ? ((val - old.value) / old.value) * 100 : null;
+                next[sym] = { value: val, history: history, change: change };
+              }
+              return next;
+            });
+          }).catch(function(){});
+        }
+        poll();
+        var iv = setInterval(poll, 5000);
+        return function() { mounted = false; clearInterval(iv); };
+      }, []);
+    }
 
     function useMarkets5m() {
       const [markets, setMarkets] = useState([]);
@@ -61,27 +116,32 @@
       return { markets, loading, error, refetch: fetchMarkets };
     }
 
-    function useRTDS(onMessage) {
+    function useSpotWebSocket(onMessage) {
       const [status, setStatus] = useState('disconnected');
       const wsRef = useRef(null);
-      const pingRef = useRef(null);
       const backoffRef = useRef(1000);
       const connect = useCallback(function() {
         if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) return;
         setStatus('connecting');
-        const ws = new WebSocket(RTDS_WS);
+        const ws = new WebSocket(KRAKEN_SPOT_WS);
         wsRef.current = ws;
         ws.onopen = function() {
-          setStatus('connected');
           backoffRef.current = 1000;
-          ws.send(JSON.stringify({ action: 'subscribe', subscriptions: [{ topic: 'crypto_prices', type: 'update', filters: 'btcusdt,ethusdt,solusdt' }] }));
+          ws.send(JSON.stringify({ method: 'subscribe', params: { channel: 'ticker', symbol: KRAKEN_PAIRS } }));
+          setStatus('connected');
         };
         ws.onmessage = function(e) {
           try {
-            const raw = e.data;
-            if (typeof raw === 'string' && raw === 'pong') return;
-            const msg = JSON.parse(raw);
-            if (msg.topic === 'crypto_prices' && msg.payload) onMessage(msg);
+            const msg = JSON.parse(e.data);
+            if (msg.channel !== 'ticker' || !msg.data) return;
+            var arr = Array.isArray(msg.data) ? msg.data : [msg.data];
+            for (var i = 0; i < arr.length; i++) {
+              var d = arr[i];
+              var raw = (d.symbol || '').replace('/','').toLowerCase();
+              var sym = raw === 'btcusd' ? 'btcusdt' : raw === 'ethusd' ? 'ethusdt' : raw === 'solusd' ? 'solusdt' : raw === 'maticusd' ? 'maticusdt' : raw === 'linkusd' ? 'linkusdt' : raw + 'usdt';
+              var val = d.last != null ? d.last : (d.ask != null ? d.ask : d.bid);
+              if (sym && val != null) onMessage({ symbol: sym, value: parseFloat(val) });
+            }
           } catch (_) {}
         };
         ws.onclose = function() {
@@ -94,11 +154,7 @@
       }, [onMessage]);
       useEffect(function() {
         connect();
-        pingRef.current = setInterval(function() {
-          if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) wsRef.current.send('ping');
-        }, 5000);
         return function() {
-          clearInterval(pingRef.current);
           if (wsRef.current) { wsRef.current.close(); wsRef.current = null; }
         };
       }, [connect]);
@@ -170,7 +226,7 @@
               h('span', { className: 'w-1.5 h-1.5 rounded-full bg-[#00ff88] live-pulse' }), ' LIVE')),
           h('div', { className: 'flex items-center gap-6 font-mono text-xs' },
             h('div', { className: 'flex items-center gap-2' }, h(StatusDot, { status: props.clobStatus }), h('span', { className: 'text-[var(--text-dim)]' }, 'CLOB')),
-            h('div', { className: 'flex items-center gap-2' }, h(StatusDot, { status: props.rtdsStatus }), h('span', { className: 'text-[var(--text-dim)]' }, 'RTDS')),
+            h('div', { className: 'flex items-center gap-2' }, h(StatusDot, { status: props.spotWsStatus }), h('span', { className: 'text-[var(--text-dim)]' }, 'Spot')),
             props.msgCount > 0 ? h('span', { className: 'text-[var(--text-dim)]' }, props.msgCount + ' msgs') : null,
             h('span', { className: 'text-[var(--text-dim)]' }, clock))));
     }
@@ -178,16 +234,16 @@
     function Sparkline(props) {
       const arr = [...(props.history || []), props.value].filter(function(v) { return v != null; }).slice(-30);
       if (arr.length < 2) return null;
-      const w = props.w || 80, h = props.h || 24;
+      const w = props.w || 80, height = props.h || 24;
       const min = Math.min.apply(null, arr), max = Math.max.apply(null, arr), range = max - min || 1;
-      const points = arr.map(function(v, i) { return (i / (arr.length - 1)) * w + ',' + (h - ((v - min) / range) * (h - 2) - 1); }).join(' ');
+      const points = arr.map(function(v, i) { return (i / (arr.length - 1)) * w + ',' + (height - ((v - min) / range) * (height - 2) - 1); }).join(' ');
       const dir = arr[arr.length - 1] >= arr[0] ? '#00ff88' : '#ff3355';
-      return h('svg', { width: w, height: h, className: 'shrink-0' },
+      return h('svg', { width: w, height: height, className: 'shrink-0' },
         h('defs', null, h('linearGradient', { id: 'spark', x1: 0, y1: 0, x2: 0, y2: 1 },
           h('stop', { offset: '0%', stopColor: dir, stopOpacity: 0.3 }),
           h('stop', { offset: '100%', stopColor: dir, stopOpacity: 0 }))),
         h('polyline', { points: points, fill: 'none', stroke: dir, strokeWidth: 1 }),
-        h('polygon', { points: '0,' + h + ' ' + points + ' ' + w + ',' + h, fill: 'url(#spark)' }));
+        h('polygon', { points: '0,' + height + ' ' + points + ' ' + w + ',' + height, fill: 'url(#spark)' }));
     }
 
     function SpotPriceRow(props) {
@@ -300,27 +356,27 @@
       const addLog = useCallback(function(msg) {
         setActivityLog(function(prev) { return prev.slice(-99).concat([{ ts: new Date().toLocaleTimeString(), msg: msg }]); });
       }, []);
-      const rtdsLogThrottle = useRef({ last: 0 });
+      const spotLogThrottle = useRef({ last: 0 });
       const addRawWs = useCallback(function(source, data) {
-        if (source === 'RTDS') {
+        if (source === 'Spot') {
           var now = Date.now();
-          if (now - rtdsLogThrottle.current.last < 1000) return;
-          rtdsLogThrottle.current.last = now;
+          if (now - spotLogThrottle.current.last < 1000) return;
+          spotLogThrottle.current.last = now;
         }
         setRawWsLog(function(prev) {
           var entry = { ts: new Date().toLocaleTimeString(), source: source, data: data };
           return prev.slice(-199).concat([entry]);
         });
       }, []);
-      const handleRTDS = useCallback(function(msg) {
-        addRawWs('RTDS', msg);
-        const payload = msg.payload || {};
-        if (!payload.symbol || payload.value == null) return;
+      const handleSpotWs = useCallback(function(msg) {
+        var sym = msg.symbol, val = msg.value;
+        if (!sym || val == null || isNaN(val)) return;
+        addRawWs('Spot', msg);
         setSpotPrices(function(prev) {
-          const old = prev[payload.symbol];
+          const old = prev[sym];
           const history = (old ? (old.history || []).concat(old.value) : []).filter(function(v){ return v != null; }).slice(-29);
-          const change = old && old.value != null ? ((payload.value - old.value) / old.value) * 100 : null;
-          var next = {}; for (var k in prev) next[k] = prev[k]; next[payload.symbol] = { value: payload.value, history: history, change: change }; return next;
+          const change = old && old.value != null ? ((val - old.value) / old.value) * 100 : null;
+          var next = {}; for (var k in prev) next[k] = prev[k]; next[sym] = { value: val, history: history, change: change }; return next;
         });
       }, [addRawWs]);
       const handleCLOB = useCallback(function(data) {
@@ -368,7 +424,8 @@
 
       const [selectedAsset, setSelectedAsset] = useState('BTC');
       const [selectedWindow, setSelectedWindow] = useState('now');
-      const rtdsStatus = useRTDS(handleRTDS);
+      useSpotPricesRest(setSpotPrices);
+      const spotWsStatus = useSpotWebSocket(handleSpotWs);
       const assetIds = markets.map(function(m) { return m.yesTokenId; }).filter(Boolean);
       const clobStatus = useCLOB(assetIds, handleCLOB);
       const now = Date.now();
@@ -398,19 +455,19 @@
       }, [activeMarkets.length]);
 
       if (loading && markets.length === 0) {
-        return h('div', { className: 'min-h-screen flex flex-col items-center justify-center gap-4' },
-          h('div', { className: 'w-10 h-10 border-2 border-[#7c6ef4] border-t-transparent rounded-full animate-spin' }),
+        return h('div', { className: 'min-h-screen flex flex-col items-center justify-center gap-4', style: { background: '#0a0a0f' } },
+          h('div', { className: 'w-10 h-10 border-2 border-[#7c6ef4] border-t-transparent rounded-full spin' }),
           h('p', { className: 'text-[var(--text-dim)]' }, 'Loading 5-min markets...'));
       }
       if (error && markets.length === 0) {
-        return h('div', { className: 'min-h-screen flex flex-col items-center justify-center gap-4' },
+        return h('div', { className: 'min-h-screen flex flex-col items-center justify-center gap-4', style: { background: '#0a0a0f' } },
           h('p', { className: 'text-[#ff3355]' }, 'Failed to load markets: ' + error),
           h('button', { onClick: refetch, className: 'px-4 py-2 rounded-lg bg-[#7c6ef4] hover:bg-[#6b5ce7] text-white font-medium' }, 'Retry'));
       }
-      return h('div', { className: 'min-h-screen' },
-        h(Header, { clobStatus: clobStatus, rtdsStatus: rtdsStatus, msgCount: msgCount }),
+      return h('div', { className: 'min-h-screen', style: { background: '#0a0a0f', color: '#e8e8f0' } },
+        h(Header, { clobStatus: clobStatus, spotWsStatus: spotWsStatus, msgCount: msgCount }),
         h(SpotPriceRow, { spotPrices: spotPrices }),
-        h('main', { className: 'max-w-7xl mx-auto px-4 py-6' },
+        h('main', { className: 'max-w-7xl mx-auto px-4 py-6', style: { minHeight: 200 } },
           activeMarkets.length === 0
             ? h('div', { className: 'text-center py-16 rounded-xl border border-white/10 bg-[#111118]' },
                 h('p', { className: 'text-[var(--text-dim)] mb-4' }, 'No active 5-min crypto markets right now.'),
@@ -436,7 +493,7 @@
                     disabled: assetMarkets.length < 2,
                     className: 'px-3 py-1.5 rounded-lg text-xs font-medium ' + (selectedWindow === 'future' ? 'bg-[#7c6ef4]/20 text-[#7c6ef4]' : assetMarkets.length >= 2 ? 'bg-white/5 text-[var(--text-dim)] hover:bg-white/10' : 'bg-white/5 text-gray-600 cursor-not-allowed opacity-50')
                   }, 'Future')),
-                currentMarket ? h(MarketCard, { key: currentMarket.conditionId, market: currentMarket, marketState: marketState, activityLog: activityLog }) : h('div', { className: 'text-center py-8 text-[var(--text-dim)] text-sm' }, 'No ' + selectedWindow + ' window for ' + selectedAsset))),
+                currentMarket ? h(MarketCard, { key: currentMarket.conditionId, market: currentMarket, marketState: marketState }) : h('div', { className: 'text-center py-8 text-[var(--text-dim)] text-sm' }, 'No ' + selectedWindow + ' window for ' + selectedAsset))),
         h(ActivityLog, { logs: activityLog }),
         h('div', { className: 'max-w-7xl mx-auto px-4 py-3' },
           h('div', { className: 'rounded-xl border border-white/10 bg-[#111118] overflow-hidden', style: { maxHeight: 240 } },
@@ -455,13 +512,15 @@
 
     var rootEl = document.getElementById('root');
     try {
-      if (ReactDOM.createRoot) {
-        ReactDOM.createRoot(rootEl).render(h(App));
+      if (typeof React === 'undefined' || typeof ReactDOM === 'undefined') {
+        rootEl.innerHTML = '<div style="padding:2rem;color:#ff3355;font-family:sans-serif;text-align:center">Failed to load React. Check your connection or try again.</div>';
+      } else if (ReactDOM.createRoot) {
+        ReactDOM.createRoot(rootEl).render(h(ErrorBoundary, null, h(App)));
       } else {
-        ReactDOM.render(h(App), rootEl);
+        ReactDOM.render(h(ErrorBoundary, null, h(App)), rootEl);
       }
     } catch (e) {
-      rootEl.innerHTML = '<div style="padding:2rem;color:#ff3355;font-family:sans-serif">Error: ' + (e.message || String(e)) + '</div>';
+      rootEl.innerHTML = '<div style="padding:2rem;color:#ff3355;font-family:sans-serif;max-width:400px;margin:0 auto">Error: ' + (e.message || String(e)) + '</div>';
       console.error(e);
     }
   </script>
