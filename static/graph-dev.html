@@ -1,0 +1,144 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Graph Dev - 5m Window</title>
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+  <style>
+    :root { --bg:#0a0a0f; --card:#111118; --up:#00ff88; --down:#ff3355; --neutral:#7c6ef4; --text:#e8e8f0; --text-dim:#666680; }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: var(--bg); color: var(--text); font-family: 'Inter', sans-serif; padding: 2rem; }
+    .font-mono { font-family: 'JetBrains Mono', monospace; }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+  <script>
+    const { useState, useEffect } = React;
+    const h = React.createElement;
+
+    const WINDOW_SEC = 300;
+
+    // Generate realistic mock data: price over 5-min window (t = 0..elapsed)
+    function generateMockWindowHistory(elapsed) {
+      var base = 69000;
+      var data = [];
+      for (var t = 0; t <= elapsed; t += 2) {
+        var noise = Math.sin(t / 20) * 15 + Math.sin(t / 7) * 8 + (Math.random() - 0.5) * 10;
+        var trend = (t / elapsed) * 25;
+        data.push({ t: t, price: base + noise + trend });
+      }
+      return data;
+    }
+
+    function generateMockSparklineHistory() {
+      var base = 69000;
+      var arr = [];
+      for (var i = 0; i < 25; i++) {
+        arr.push(base + Math.sin(i / 3) * 20 + (Math.random() - 0.5) * 15);
+      }
+      return arr;
+    }
+
+    function WindowGraph(props) {
+      const [tick, setTick] = useState(0);
+      useEffect(function() {
+        var iv = setInterval(function() { setTick(function(t) { return t + 1; }); }, 1000);
+        return function() { clearInterval(iv); };
+      }, []);
+      var data = (props.windowHistory || []).slice().sort(function(a,b){ return a.t - b.t; });
+      var nowSec = Math.floor(Date.now() / 1000);
+      var nowWindow = Math.floor(nowSec / WINDOW_SEC) * WINDOW_SEC;
+      var elapsed = nowSec - nowWindow;
+      var w = props.w || 320, height = props.h || 100;
+      var pad = { left: 8, right: 8, top: 10, bottom: 14 };
+      var plotW = w - pad.left - pad.right;
+      var plotH = height - pad.top - pad.bottom;
+      if (data.length < 2) {
+        return h('div', { className: 'rounded-lg border border-white/10 bg-black/20 p-4', style: { width: w, height: height } },
+          h('span', { className: 'text-[10px] text-[var(--text-dim)]' }, 'Waiting for data...'));
+      }
+      var anchorPrice = data[0].price;
+      var minP = Math.min.apply(null, data.map(function(d){ return d.price; }));
+      var maxP = Math.max.apply(null, data.map(function(d){ return d.price; }));
+      var rangeUp = Math.max(maxP - anchorPrice, anchorPrice * 0.001);
+      var rangeDown = Math.max(anchorPrice - minP, anchorPrice * 0.001);
+      var range = Math.max(rangeUp, rangeDown);
+      var yMin = anchorPrice - range, yMax = anchorPrice + range;
+      var yRange = yMax - yMin;
+      var maxT = Math.max(elapsed, 1);
+      var xScale = plotW / maxT;
+      var rightX = pad.left + plotW;
+      var pts = data.map(function(d) {
+        var x = pad.left + (d.t / maxT) * plotW;
+        var y = pad.top + plotH - ((d.price - yMin) / yRange) * plotH;
+        return x + ',' + y;
+      });
+      var points = pts.join(' ');
+      var dir = data[data.length-1].price >= data[0].price ? '#00ff88' : '#ff3355';
+      var gradId = 'wingrad-' + (props.id || '0');
+      var polyPoints = pad.left + ',' + (pad.top + plotH) + ' ' + points + ' ' + rightX + ',' + (pad.top + plotH);
+      return h('div', { className: 'flex flex-col gap-1.5' },
+        h('div', { className: 'text-[10px] text-[var(--text-dim)] font-mono' }, '5m window  •  ' + elapsed + 's elapsed'),
+        h('svg', { width: w, height: height, className: 'rounded-lg overflow-hidden', style: { background: 'rgba(0,0,0,0.35)', border: '1px solid rgba(255,255,255,0.08)' } },
+          h('defs', null,
+            h('linearGradient', { id: gradId, x1: 0, y1: 0, x2: 0, y2: 1 },
+              h('stop', { offset: '0%', stopColor: dir, stopOpacity: 0.4 }),
+              h('stop', { offset: '100%', stopColor: dir, stopOpacity: 0 }))),
+          h('polygon', { points: polyPoints, fill: 'url(#' + gradId + ')' }),
+          h('polyline', { points: points, fill: 'none', stroke: dir, strokeWidth: 2.5, strokeLinecap: 'round', strokeLinejoin: 'round' }),
+          h('line', { x1: rightX, y1: pad.top, x2: rightX, y2: pad.top + plotH, stroke: 'rgba(255,255,255,0.4)', strokeWidth: 1.5, strokeDasharray: '5 4' })));
+    }
+
+    function Sparkline(props) {
+      const arr = [...(props.history || []), props.value].filter(function(v) { return v != null; }).slice(-30);
+      if (arr.length < 2) return null;
+      const w = props.w || 80, height = props.h || 24;
+      const min = Math.min.apply(null, arr), max = Math.max.apply(null, arr), range = max - min || 1;
+      const points = arr.map(function(v, i) {
+        return (i / (arr.length - 1)) * w + ',' + (height - ((v - min) / range) * (height - 2) - 1);
+      }).join(' ');
+      const dir = arr[arr.length - 1] >= arr[0] ? '#00ff88' : '#ff3355';
+      return h('svg', { width: w, height: height, className: 'shrink-0' },
+        h('defs', null,
+          h('linearGradient', { id: 'spark', x1: 0, y1: 0, x2: 0, y2: 1 },
+            h('stop', { offset: '0%', stopColor: dir, stopOpacity: 0.3 }),
+            h('stop', { offset: '100%', stopColor: dir, stopOpacity: 0 }))),
+        h('polygon', { points: '0,' + height + ' ' + points + ' ' + w + ',' + height, fill: 'url(#spark)' }),
+        h('polyline', { points: points, fill: 'none', stroke: dir, strokeWidth: 1 }));
+    }
+
+    function App() {
+      const [tick, setTick] = useState(0);
+      useEffect(function() {
+        var iv = setInterval(function() { setTick(function(t) { return t + 1; }); }, 800);
+        return function() { clearInterval(iv); };
+      }, []);
+      var nowSec = Math.floor(Date.now() / 1000);
+      var nowWindow = Math.floor(nowSec / WINDOW_SEC) * WINDOW_SEC;
+      var elapsed = nowSec - nowWindow;
+      var windowHistory = generateMockWindowHistory(Math.min(elapsed, 290));
+      var sparkHistory = generateMockSparklineHistory();
+      var currentPrice = sparkHistory[sparkHistory.length - 1] || 69000;
+
+      return h('div', { className: 'max-w-md space-y-6' },
+        h('h1', { className: 'text-xl font-bold text-[var(--text)]' }, 'Graph Dev'),
+        h('div', { className: 'rounded-xl border border-white/10 bg-[#111118]/80 p-4 space-y-4' },
+          h('div', { className: 'font-mono text-sm' },
+            h('span', { className: 'text-[var(--text-dim)]' }, 'BTC '),
+            h('span', { className: 'font-bold text-[var(--up)]' }, '$' + currentPrice.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }))),
+          h(WindowGraph, { windowHistory: windowHistory, w: 320, h: 100 }),
+          h('div', { className: 'flex items-center gap-2' },
+            h('span', { className: 'text-[10px] text-[var(--text-dim)] font-mono' }, 'Sparkline:'),
+            h(Sparkline, { history: sparkHistory, value: currentPrice, w: 80, h: 28 }))));
+    }
+
+    var root = document.getElementById('root');
+    ReactDOM.createRoot(root).render(h(App));
+  </script>
+</body>
+</html>

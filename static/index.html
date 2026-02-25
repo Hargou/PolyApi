@@ -52,8 +52,9 @@
     }
     const API = window.location.origin;
     const CLOB_WS = 'wss://ws-subscriptions-clob.polymarket.com/ws/market';
-    const KRAKEN_SPOT_WS = 'wss://ws.kraken.com/v2';
-    const ASSET_TO_KRAKEN = { BTC: 'BTC/USD', ETH: 'ETH/USD', SOL: 'SOL/USD' };
+    const BINANCE_US_BASE = 'wss://stream.binance.us:9443';
+    const COINBASE_SPOT_WS = 'wss://ws-feed.exchange.coinbase.com';
+    const ASSET_TO_COINBASE = { BTC: 'BTC-USD', ETH: 'ETH-USD', SOL: 'SOL-USD' };
     const ASSET_TO_SYM = { BTC: 'btcusdt', ETH: 'ethusdt', SOL: 'solusdt' };
     const WINDOW_SEC = 300;
 
@@ -108,40 +109,51 @@
       return { markets, loading, error, refetch: fetchMarkets };
     }
 
-    function useSpotWebSocket(selectedAsset, onMessage) {
+    function useSpotWebSocket(selectedAsset, spotSource, onMessage) {
       const [status, setStatus] = useState('disconnected');
       const wsRef = useRef(null);
       const backoffRef = useRef(1000);
-      const connect = useCallback(function(asset) {
+      const connect = useCallback(function(asset, src) {
         if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) return;
-        var pair = ASSET_TO_KRAKEN[asset] || 'BTC/USD';
+        var url, subMsg;
+        var sym = (ASSET_TO_SYM[asset] || 'btcusdt').toLowerCase();
+        if (src === 'binance_us') {
+          url = BINANCE_US_BASE + '/stream?streams=' + sym + '@ticker';
+          subMsg = null;
+        } else {
+          url = COINBASE_SPOT_WS;
+          subMsg = JSON.stringify({ type: 'subscribe', product_ids: [ASSET_TO_COINBASE[asset] || 'BTC-USD'], channels: ['ticker'] });
+        }
         setStatus('connecting');
-        const ws = new WebSocket(KRAKEN_SPOT_WS);
+        const ws = new WebSocket(url);
         wsRef.current = ws;
         ws.onopen = function() {
           backoffRef.current = 1000;
-          ws.send(JSON.stringify({ method: 'subscribe', params: { channel: 'ticker', symbol: [pair], event_trigger: 'bbo' } }));
+          if (subMsg) ws.send(subMsg);
           setStatus('connected');
         };
         ws.onmessage = function(e) {
           try {
-            const msg = JSON.parse(e.data);
-            if (msg.channel !== 'ticker' || !msg.data) return;
-            var arr = Array.isArray(msg.data) ? msg.data : [msg.data];
-            for (var i = 0; i < arr.length; i++) {
-              var d = arr[i];
-              var raw = (d.symbol || '').replace('/','').toLowerCase();
-              var sym = raw === 'btcusd' ? 'btcusdt' : raw === 'ethusd' ? 'ethusdt' : raw === 'solusd' ? 'solusdt' : raw + 'usdt';
-              var bid = d.bid != null ? parseFloat(d.bid) : NaN, ask = d.ask != null ? parseFloat(d.ask) : NaN, last = d.last != null ? parseFloat(d.last) : NaN;
-              var val = (!isNaN(bid) && !isNaN(ask)) ? (bid + ask) / 2 : (!isNaN(last) ? last : (!isNaN(ask) ? ask : bid));
-              if (sym && !isNaN(val)) onMessage({ symbol: sym, value: val });
+            var msg = JSON.parse(e.data);
+            var out = null;
+            if (src === 'binance_us') {
+              var d = msg.data || msg;
+              var stream = msg.stream || '';
+              if ((stream.indexOf('@ticker') >= 0 || d.e === '24hrTicker') && (d.c != null || d.p != null)) {
+                out = { symbol: (d.s || stream.split('@')[0] || '').toLowerCase(), value: parseFloat(d.c || d.p || 0) };
+              }
+            } else if (msg.type === 'ticker' && msg.price != null) {
+              var pid = (msg.product_id || '').replace('-','').toLowerCase();
+              var s = pid === 'btcusd' ? 'btcusdt' : pid === 'ethusd' ? 'ethusdt' : pid === 'solusd' ? 'solusdt' : null;
+              if (s) out = { symbol: s, value: parseFloat(msg.price) };
             }
+            if (out && out.symbol && !isNaN(out.value)) onMessage(out);
           } catch (_) {}
         };
         ws.onclose = function() {
           setStatus('disconnected');
           wsRef.current = null;
-          setTimeout(function() { connect(asset); }, Math.min(backoffRef.current, 30000));
+          setTimeout(function() { connect(asset, src); }, Math.min(backoffRef.current, 30000));
           backoffRef.current *= 2;
         };
         ws.onerror = function() { setStatus('disconnected'); };
@@ -149,11 +161,11 @@
       useEffect(function() {
         if (wsRef.current) { wsRef.current.close(); wsRef.current = null; }
         backoffRef.current = 1000;
-        connect(selectedAsset || 'BTC');
+        connect(selectedAsset || 'BTC', spotSource || 'binance_us');
         return function() {
           if (wsRef.current) { wsRef.current.close(); wsRef.current = null; }
         };
-      }, [connect, selectedAsset]);
+      }, [connect, selectedAsset, spotSource]);
       return status;
     }
 
@@ -222,25 +234,44 @@
             h('span', { className: 'flex items-center gap-1.5 px-2 py-0.5 rounded-full bg-[#00ff88]/10 text-[#00ff88] text-[10px] font-bold' },
               h('span', { className: 'w-1.5 h-1.5 rounded-full bg-[#00ff88] live-pulse' }), ' LIVE')),
           h('div', { className: 'flex items-center gap-6 font-mono text-xs' },
-            h('div', { className: 'flex items-center gap-2', title: 'Order book, bids, asks from Polymarket CLOB WebSocket' }, h(StatusDot, { status: props.clobStatus }), h('span', { className: 'text-[var(--text-dim)]' }, 'CLOB (Polymarket)')),
-            h('div', { className: 'flex items-center gap-2', title: 'Spot prices + Now window price from Kraken WebSocket' }, h(StatusDot, { status: props.spotWsStatus }), h('span', { className: 'text-[var(--text-dim)]' }, 'Spot (Kraken)')),
+            h('div', { className: 'flex items-center gap-2', title: 'Order book, bids, asks from Polymarket CLOB WebSocket' }, h(StatusDot, { status: props.clobStatus }), h('span', { className: 'text-[var(--text-dim)]' }, 'CLOB'), h('span', { className: 'text-[#00ff88] font-mono text-[10px]' }, props.wsStats && props.wsStats.clob ? props.wsStats.clob + '/s' : '-')),
+            h('div', { className: 'flex items-center gap-2' },
+              h(StatusDot, { status: props.spotWsStatus }),
+              h('span', { className: 'text-[var(--text-dim)]' }, 'Spot'),
+              h('div', { className: 'flex rounded-lg overflow-hidden border border-white/10' },
+                h('button', {
+                  onClick: function() { props.setSpotSource && props.setSpotSource('binance_us'); },
+                  className: 'px-2 py-1 text-[10px] font-mono ' + (props.spotSource === 'binance_us' ? 'bg-[#7c6ef4] text-white' : 'bg-white/5 text-[var(--text-dim)] hover:bg-white/10')
+                }, 'Binance US'),
+                h('button', {
+                  onClick: function() { props.setSpotSource && props.setSpotSource('coinbase'); },
+                  className: 'px-2 py-1 text-[10px] font-mono ' + (props.spotSource === 'coinbase' ? 'bg-[#7c6ef4] text-white' : 'bg-white/5 text-[var(--text-dim)] hover:bg-white/10')
+                }, 'Coinbase')),
+              h('span', { className: 'text-[#00ff88] font-mono text-[10px]' }, props.wsStats && props.wsStats.spot ? props.wsStats.spot + '/s' : '-')),
             props.msgCount > 0 ? h('span', { className: 'text-[var(--text-dim)]' }, props.msgCount + ' msgs') : null,
             h('span', { className: 'text-[var(--text-dim)]' }, clock))));
     }
 
     function Sparkline(props) {
-      const arr = [...(props.history || []), props.value].filter(function(v) { return v != null; }).slice(-30);
+      var maxPoints = props.maxPoints || 30;
+      var gradId = 'spark-' + (props.id || 'x');
+      var arr = [...(props.history || []), props.value].filter(function(v) { return v != null; }).slice(-maxPoints);
       if (arr.length < 2) return null;
-      const w = props.w || 80, height = props.h || 24;
-      const min = Math.min.apply(null, arr), max = Math.max.apply(null, arr), range = max - min || 1;
-      const points = arr.map(function(v, i) { return (i / (arr.length - 1)) * w + ',' + (height - ((v - min) / range) * (height - 2) - 1); }).join(' ');
-      const dir = arr[arr.length - 1] >= arr[0] ? '#00ff88' : '#ff3355';
-      return h('svg', { width: w, height: height, className: 'shrink-0' },
-        h('defs', null, h('linearGradient', { id: 'spark', x1: 0, y1: 0, x2: 0, y2: 1 },
-          h('stop', { offset: '0%', stopColor: dir, stopOpacity: 0.3 }),
-          h('stop', { offset: '100%', stopColor: dir, stopOpacity: 0 }))),
-        h('polyline', { points: points, fill: 'none', stroke: dir, strokeWidth: 1 }),
-        h('polygon', { points: '0,' + height + ' ' + points + ' ' + w + ',' + height, fill: 'url(#spark)' }));
+      var w = props.w || 80, height = props.h || 24;
+      var min = Math.min.apply(null, arr), max = Math.max.apply(null, arr);
+      var range = Math.max(max - min, (min + max) / 2 * 0.0001);
+      var pad = 2;
+      var plotH = height - pad * 2;
+      var points = arr.map(function(v, i) {
+        var x = pad + (i / (arr.length - 1)) * (w - pad * 2);
+        var y = pad + plotH - ((v - min) / range) * plotH;
+        return x + ',' + y;
+      }).join(' ');
+      var dir = arr[arr.length - 1] >= arr[0] ? '#00ff88' : '#ff3355';
+      return h('svg', { width: w, height: height, className: 'shrink-0 rounded', style: { background: 'rgba(0,0,0,0.2)' } },
+        h('defs', null, h('linearGradient', { id: gradId, x1: 0, y1: 0, x2: 0, y2: 1 }, h('stop', { offset: '0%', stopColor: dir, stopOpacity: 0.35 }), h('stop', { offset: '100%', stopColor: dir, stopOpacity: 0 }))),
+        h('polygon', { points: pad + ',' + height + ' ' + points + ' ' + (w - pad) + ',' + height, fill: 'url(#' + gradId + ')' }),
+        h('polyline', { points: points, fill: 'none', stroke: dir, strokeWidth: 1.5, strokeLinecap: 'round', strokeLinejoin: 'round' }));
     }
 
     function formatFullPrice(v, sym) {
@@ -270,7 +301,7 @@
               const symLabel = s.replace('usdt','').toUpperCase();
               var pctFromNow = null;
               if (d.value != null && wp.now != null && wp.now > 0) pctFromNow = ((d.value - wp.now) / wp.now) * 100;
-                return h('div', { key: s, className: 'flex flex-col gap-1 min-w-[180px]' },
+                return h('div', { key: s, className: 'flex flex-col gap-1.5 min-w-[200px]' },
                 h('div', { className: 'flex items-center gap-2' },
                   h('span', { className: 'text-[var(--text-dim)] text-xs font-medium' }, symLabel),
                   h('span', { className: 'font-mono font-bold text-sm' }, formatFullPrice(d.value, s)),
@@ -279,7 +310,15 @@
                   h('span', null, 'Now ', formatTime(nowWindow), ': ', formatFullPrice(wp.now, s)),
                   h('br'),
                   h('span', null, 'Next ', formatTime(futureWindow), ': ', formatFullPrice(wp.future, s))),
-                h(Sparkline, { history: d.history, value: d.value, w: 60, h: 20 }));
+                h('div', { className: 'flex flex-col gap-1' },
+                  h('div', { className: 'text-[10px] text-[var(--text-dim)] font-mono' }, '5m window  •  ' + (Math.floor(Date.now()/1000) - Math.floor(Date.now()/1000/WINDOW_SEC)*WINDOW_SEC) + 's elapsed'),
+                  (function() {
+                    var winPrices = (d.windowHistory || []).slice().sort(function(a,b){ return a.t - b.t; }).map(function(x){ return x.price; });
+                    var arr = [...winPrices, d.value].filter(function(v){ return v != null; });
+                    if (arr.length < 2) return h('div', { className: 'rounded flex items-center justify-center', style: { width: 320, height: 80, background: 'rgba(0,0,0,0.2)' } }, h('span', { className: 'text-[10px] text-[var(--text-dim)]' }, 'Waiting for data...'));
+                    return h(Sparkline, { id: 'window-' + s, history: winPrices, value: d.value, w: 320, h: 80, maxPoints: 500 });
+                  })()),
+                h(Sparkline, { id: 'tick-' + s, history: d.history, value: d.value, w: 80, h: 28 }));
             }))));
     }
 
@@ -382,6 +421,9 @@
       const [windowPrices, setWindowPrices] = useState({});
       const priceAtWindowRef = useRef({});
       const lastWindowRef = useRef({});
+      const spotMsgCountRef = useRef({ count: 0, lastReset: Date.now() });
+      const clobMsgCountRef = useRef({ count: 0, lastReset: Date.now() });
+      const [wsStats, setWsStats] = useState({ spot: 0, clob: 0 });
       const [marketState, setMarketState] = useState({});
       const [activityLog, setActivityLog] = useState([]);
       const [rawWsLog, setRawWsLog] = useState([]);
@@ -403,12 +445,19 @@
       }, []);
       const updateSpotPrice = useCallback(function(sym, val) {
         if (!sym || val == null || isNaN(val)) return;
-        var w = Math.floor(Date.now() / 1000 / WINDOW_SEC) * WINDOW_SEC;
+        var nowSec = Math.floor(Date.now() / 1000);
+        var w = Math.floor(nowSec / WINDOW_SEC) * WINDOW_SEC;
+        var t = nowSec - w;
         setSpotPrices(function(prev) {
           const old = prev[sym];
           const history = (old ? (old.history || []).concat(old.value) : []).filter(function(v){ return v != null; }).slice(-29);
           const change = old && old.value != null ? ((val - old.value) / old.value) * 100 : null;
-          var next = {}; for (var k in prev) next[k] = prev[k]; next[sym] = { value: val, history: history, change: change }; return next;
+          var winHist = (old && old.windowHistory) || [];
+          if (lastWindowRef.current[sym] !== w) winHist = [];
+          winHist = winHist.concat([{ t: t, price: val }]).slice(-400);
+          var next = {}; for (var k in prev) next[k] = prev[k];
+          next[sym] = { value: val, history: history, change: change, windowHistory: winHist };
+          return next;
         });
         if (lastWindowRef.current[sym] !== w) {
           lastWindowRef.current[sym] = w;
@@ -426,11 +475,13 @@
       }, []);
       const handleSpotWs = useCallback(function(msg) {
         if (!msg.symbol || msg.value == null || isNaN(msg.value)) return;
+        spotMsgCountRef.current.count++;
         addRawWs('Spot', msg);
         updateSpotPrice(msg.symbol, msg.value);
       }, [addRawWs, updateSpotPrice]);
       const handleCLOB = useCallback(function(data) {
         if (Array.isArray(data)) { data.forEach(handleCLOB); return; }
+        clobMsgCountRef.current.count++;
         addRawWs('CLOB', data);
         setMsgCount(function(c) { return c + 1; });
         function processAsset(assetId, bestBid, bestAsk, price, side, size) {
@@ -483,10 +534,25 @@
 
       const [selectedAsset, setSelectedAsset] = useState('BTC');
       const [selectedWindow, setSelectedWindow] = useState('now');
+      const [spotSource, setSpotSource] = useState('binance_us');
       useSpotPricesRest(updateSpotPrice);
-      const spotWsStatus = useSpotWebSocket(selectedAsset, handleSpotWs);
+      const spotWsStatus = useSpotWebSocket(selectedAsset, spotSource, handleSpotWs);
       const assetIds = markets.filter(function(m) { return m.asset === selectedAsset; }).map(function(m) { return m.yesTokenId; }).filter(Boolean);
       const clobStatus = useCLOB(assetIds, handleCLOB);
+      useEffect(function() {
+        var iv = setInterval(function() {
+          var now = Date.now();
+          var spotEl = (now - spotMsgCountRef.current.lastReset) / 1000;
+          var clobEl = (now - clobMsgCountRef.current.lastReset) / 1000;
+          setWsStats({
+            spot: spotEl > 0 ? (spotMsgCountRef.current.count / spotEl).toFixed(1) : 0,
+            clob: clobEl > 0 ? (clobMsgCountRef.current.count / clobEl).toFixed(1) : 0
+          });
+          spotMsgCountRef.current = { count: 0, lastReset: now };
+          clobMsgCountRef.current = { count: 0, lastReset: now };
+        }, 2000);
+        return function() { clearInterval(iv); };
+      }, []);
       const now = Date.now();
       const activeMarkets = markets.filter(function(m) {
         var end = new Date(m.endDate || 0).getTime();
@@ -524,7 +590,7 @@
           h('button', { onClick: refetch, className: 'px-4 py-2 rounded-lg bg-[#7c6ef4] hover:bg-[#6b5ce7] text-white font-medium' }, 'Retry'));
       }
       return h('div', { className: 'min-h-screen', style: { background: '#0a0a0f', color: '#e8e8f0' } },
-        h(Header, { clobStatus: clobStatus, spotWsStatus: spotWsStatus, msgCount: msgCount }),
+        h(Header, { clobStatus: clobStatus, spotWsStatus: spotWsStatus, msgCount: msgCount, wsStats: wsStats, spotSource: spotSource, setSpotSource: setSpotSource }),
         h(SpotPriceRow, { spotPrices: spotPrices, windowPrices: windowPrices, selectedAsset: selectedAsset }),
         h('main', { className: 'max-w-7xl mx-auto px-4 py-6', style: { minHeight: 200 } },
           activeMarkets.length === 0
