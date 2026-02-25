@@ -53,10 +53,11 @@
     const API = window.location.origin;
     const CLOB_WS = 'wss://ws-subscriptions-clob.polymarket.com/ws/market';
     const KRAKEN_SPOT_WS = 'wss://ws.kraken.com/v2';
-    const SPOT_SYMBOLS = ['btcusdt','ethusdt','solusdt','maticusdt','linkusdt'];
-    const KRAKEN_PAIRS = ['BTC/USD','ETH/USD','SOL/USD','MATIC/USD','LINK/USD'];
+    const SPOT_SYMBOLS = ['btcusdt','ethusdt','solusdt'];
+    const KRAKEN_PAIRS = ['BTC/USD','ETH/USD','SOL/USD'];
+    const WINDOW_SEC = 300;
 
-    function useSpotPricesRest(setSpotPrices) {
+    function useSpotPricesRest(updateSpotPrice) {
       useEffect(function() {
         var mounted = true;
         function poll() {
@@ -66,28 +67,19 @@
             return r.json();
           }).then(function(data) {
             if (!data || !mounted) return;
-            setSpotPrices(function(prev) {
-              var next = {};
-              for (var k in prev) next[k] = prev[k];
-              for (var sym in data) {
-                var d = data[sym];
-                var val = d && (d.value != null ? d.value : d);
-                if (val == null) continue;
-                val = parseFloat(val);
-                if (isNaN(val)) continue;
-                var old = prev[sym];
-                var history = (old && old.history ? old.history.concat(old.value) : []).filter(function(v){ return v != null; }).slice(-29);
-                var change = old && old.value != null ? ((val - old.value) / old.value) * 100 : null;
-                next[sym] = { value: val, history: history, change: change };
-              }
-              return next;
-            });
+            for (var sym in data) {
+              var d = data[sym];
+              var val = d && (d.value != null ? d.value : d);
+              if (val == null) continue;
+              val = parseFloat(val);
+              if (!isNaN(val)) updateSpotPrice(sym, val);
+            }
           }).catch(function(){});
         }
         poll();
         var iv = setInterval(poll, 5000);
         return function() { mounted = false; clearInterval(iv); };
-      }, []);
+      }, [updateSpotPrice]);
     }
 
     function useMarkets5m() {
@@ -246,18 +238,37 @@
         h('polygon', { points: '0,' + height + ' ' + points + ' ' + w + ',' + height, fill: 'url(#spark)' }));
     }
 
+    function formatFullPrice(v) {
+      if (v == null) return '-';
+      if (v >= 1000) return '$' + v.toLocaleString('en-US', { minimumFractionDigits: 0, maximumFractionDigits: 0 });
+      if (v >= 1) return '$' + v.toFixed(2);
+      return '$' + v.toFixed(4);
+    }
+    function formatTime(ts) {
+      if (!ts) return '';
+      var d = new Date(ts * 1000);
+      return d.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', second: '2-digit', hour12: true });
+    }
     function SpotPriceRow(props) {
-      const format = function(v) { return v == null ? '-' : v >= 1000 ? '$' + (v/1000).toFixed(1) + 'K' : v >= 1 ? '$' + v.toFixed(2) : '$' + v.toFixed(4); };
+      var nowSec = Math.floor(Date.now() / 1000);
+      var nowWindow = Math.floor(nowSec / WINDOW_SEC) * WINDOW_SEC;
+      var futureWindow = nowWindow + WINDOW_SEC;
       return h('div', { className: 'max-w-7xl mx-auto px-4 py-3' },
         h('div', { className: 'rounded-xl border border-white/10 bg-[#111118]/80 backdrop-blur-sm p-4' },
-          h('div', { className: 'flex flex-wrap items-center gap-6' },
+          h('div', { className: 'flex flex-wrap items-center gap-8' },
             SPOT_SYMBOLS.map(function(sym) {
               const d = props.spotPrices[sym] || {};
+              const wp = props.windowPrices[sym] || {};
               const symLabel = sym.replace('usdt','').toUpperCase();
-              return h('div', { key: sym, className: 'flex items-center gap-3 min-w-[140px]' },
-                h('span', { className: 'text-[var(--text-dim)] text-xs font-medium' }, symLabel),
-                h('span', { className: 'font-mono font-bold text-sm' }, format(d.value)),
-                d.change != null ? h('span', { className: 'text-xs font-mono ' + (d.change >= 0 ? 'text-[#00ff88]' : 'text-[#ff3355]') }, (d.change >= 0 ? '+' : '') + d.change.toFixed(2) + '%') : null,
+              return h('div', { key: sym, className: 'flex flex-col gap-1 min-w-[180px]' },
+                h('div', { className: 'flex items-center gap-2' },
+                  h('span', { className: 'text-[var(--text-dim)] text-xs font-medium' }, symLabel),
+                  h('span', { className: 'font-mono font-bold text-sm' }, formatFullPrice(d.value)),
+                  d.change != null ? h('span', { className: 'text-xs font-mono ' + (d.change >= 0 ? 'text-[#00ff88]' : 'text-[#ff3355]') }, (d.change >= 0 ? '+' : '') + d.change.toFixed(2) + '%') : null),
+                h('div', { className: 'text-[10px] text-[var(--text-dim)] font-mono' },
+                  h('span', null, 'Now ', formatTime(nowWindow), ': ', formatFullPrice(wp.now)),
+                  h('br'),
+                  h('span', null, 'Next ', formatTime(futureWindow), ': ', formatFullPrice(wp.future))),
                 h(Sparkline, { history: d.history, value: d.value, w: 60, h: 20 }));
             }))));
     }
@@ -294,10 +305,19 @@
       var mid = (bestBid != null && bestAsk != null) ? (parseFloat(bestBid) + parseFloat(bestAsk)) / 2 : (s.lastTradePrice != null ? parseFloat(s.lastTradePrice) : null);
       if (mid == null && m.yes_pct != null) mid = m.yes_pct / 100;
       const spread = (bestBid != null && bestAsk != null) ? ((parseFloat(bestAsk) - parseFloat(bestBid)) * 100).toFixed(1) + '%' : null;
-      var sortedBids = bids.slice().sort(function(a,b){ return parseFloat(b.price) - parseFloat(a.price); });
-      var sortedAsks = asks.slice().sort(function(a,b){ return parseFloat(a.price) - parseFloat(b.price); });
-      if (sortedBids.length === 0) sortedBids = bids.slice();
-      if (sortedAsks.length === 0) sortedAsks = asks.slice();
+      function toLevel(x) {
+        var p = x && (x.price != null ? x.price : x[0]);
+        var s = x && (x.size != null ? x.size : x[1]);
+        return { price: p, size: s };
+      }
+      var sortedBids = bids.map(toLevel).filter(function(x){ return x.price != null && !isNaN(parseFloat(x.price)); }).sort(function(a,b){ return parseFloat(b.price) - parseFloat(a.price); });
+      var sortedAsks = asks.map(toLevel).filter(function(x){ return x.price != null && !isNaN(parseFloat(x.price)); }).sort(function(a,b){ return parseFloat(a.price) - parseFloat(b.price); });
+      if (bestBid != null && !sortedBids.some(function(x){ return Math.abs(parseFloat(x.price) - parseFloat(bestBid)) < 0.001; })) {
+        sortedBids = [{ price: bestBid, size: '-' }].concat(sortedBids);
+      }
+      if (bestAsk != null && !sortedAsks.some(function(x){ return Math.abs(parseFloat(x.price) - parseFloat(bestAsk)) < 0.001; })) {
+        sortedAsks = [{ price: bestAsk, size: '-' }].concat(sortedAsks);
+      }
       const [flash, setFlash] = useState(null);
       useEffect(function() {
         if (s.lastTradePrice != null && s.lastTradeSide) {
@@ -329,8 +349,8 @@
             h('p', { className: 'text-[9px] text-[var(--text-dim)] mb-1' }, 'Bid = best buy price, Ask = best sell price (for Up token)'),
             trades.length > 0 ? h('p', { className: 'text-[10px] text-[var(--text-dim)]' }, 'Last: ' + (parseFloat(trades[0].price || 0)*100).toFixed(1) + '% @ ' + (trades[0].size || 0) + ' (' + (trades[0].side || '') + ')') : null,
             (sortedBids.length > 0 || sortedAsks.length > 0) ? h('div', { className: 'flex gap-4 mt-2 text-[9px]' },
-              h('div', { className: 'flex-1' }, h('div', { className: 'text-[#00ff88] font-mono mb-0.5' }, 'BID (best first)'), sortedBids.slice(0,3).map(function(b,i){ return h('div', { key: i, className: 'flex justify-between' }, h('span', null, (parseFloat(b.price)*100).toFixed(1) + '%'), h('span', { className: 'text-[var(--text-dim)]' }, b.size)); })),
-              h('div', { className: 'flex-1' }, h('div', { className: 'text-[#ff3355] font-mono mb-0.5' }, 'ASK (best first)'), sortedAsks.slice(0,3).map(function(a,i){ return h('div', { key: i, className: 'flex justify-between' }, h('span', null, (parseFloat(a.price)*100).toFixed(1) + '%'), h('span', { className: 'text-[var(--text-dim)]' }, a.size)); }))) : null)),
+              h('div', { className: 'flex-1' }, h('div', { className: 'text-[#00ff88] font-mono mb-0.5' }, 'BID'), sortedBids.slice(0,5).map(function(b,i){ var p = parseFloat(b.price); return h('div', { key: i, className: 'flex justify-between' }, h('span', null, (p >= 0 && p <= 1 ? p*100 : p).toFixed(1) + '%'), h('span', { className: 'text-[var(--text-dim)]' }, b.size != null ? b.size : '-')); })),
+              h('div', { className: 'flex-1' }, h('div', { className: 'text-[#ff3355] font-mono mb-0.5' }, 'ASK'), sortedAsks.slice(0,5).map(function(a,i){ var p = parseFloat(a.price); return h('div', { key: i, className: 'flex justify-between' }, h('span', null, (p >= 0 && p <= 1 ? p*100 : p).toFixed(1) + '%'), h('span', { className: 'text-[var(--text-dim)]' }, a.size != null ? a.size : '-')); }))) : null)),
         h('div', { className: 'px-4 py-2 border-t border-white/5 flex items-center justify-between text-[10px] text-[var(--text-dim)]' },
           h('span', null, 'Vol $' + (m.volume >= 1e6 ? (m.volume/1e6).toFixed(1) + 'M' : m.volume >= 1e3 ? (m.volume/1e3).toFixed(1) + 'K' : (m.volume || 0).toFixed(1))),
           h('a', { href: 'https://polymarket.com/event/' + m.slug, target: '_blank', rel: 'noopener noreferrer', className: 'text-[#7c6ef4] hover:underline' }, 'View on Polymarket ->')));
@@ -349,6 +369,9 @@
     function App() {
       const { markets, loading, error, refetch } = useMarkets5m();
       const [spotPrices, setSpotPrices] = useState({});
+      const [windowPrices, setWindowPrices] = useState({});
+      const priceAtWindowRef = useRef({});
+      const lastWindowRef = useRef({});
       const [marketState, setMarketState] = useState({});
       const [activityLog, setActivityLog] = useState([]);
       const [rawWsLog, setRawWsLog] = useState([]);
@@ -368,17 +391,34 @@
           return prev.slice(-199).concat([entry]);
         });
       }, []);
-      const handleSpotWs = useCallback(function(msg) {
-        var sym = msg.symbol, val = msg.value;
+      const updateSpotPrice = useCallback(function(sym, val) {
         if (!sym || val == null || isNaN(val)) return;
-        addRawWs('Spot', msg);
+        var w = Math.floor(Date.now() / 1000 / WINDOW_SEC) * WINDOW_SEC;
         setSpotPrices(function(prev) {
           const old = prev[sym];
           const history = (old ? (old.history || []).concat(old.value) : []).filter(function(v){ return v != null; }).slice(-29);
           const change = old && old.value != null ? ((val - old.value) / old.value) * 100 : null;
           var next = {}; for (var k in prev) next[k] = prev[k]; next[sym] = { value: val, history: history, change: change }; return next;
         });
-      }, [addRawWs]);
+        if (lastWindowRef.current[sym] !== w) {
+          lastWindowRef.current[sym] = w;
+          if (!priceAtWindowRef.current[sym]) priceAtWindowRef.current[sym] = {};
+          priceAtWindowRef.current[sym][w] = val;
+          setWindowPrices(function(prev) {
+            var n = {}; for (var k in prev) n[k] = prev[k];
+            if (!n[sym]) n[sym] = { now: null, future: null };
+            var nowW = Math.floor(Date.now() / 1000 / WINDOW_SEC) * WINDOW_SEC;
+            var pw = priceAtWindowRef.current[sym] || {};
+            n[sym] = { now: pw[nowW] || null, future: pw[nowW + WINDOW_SEC] || null };
+            return n;
+          });
+        }
+      }, []);
+      const handleSpotWs = useCallback(function(msg) {
+        if (!msg.symbol || msg.value == null || isNaN(msg.value)) return;
+        addRawWs('Spot', msg);
+        updateSpotPrice(msg.symbol, msg.value);
+      }, [addRawWs, updateSpotPrice]);
       const handleCLOB = useCallback(function(data) {
         if (Array.isArray(data)) { data.forEach(handleCLOB); return; }
         addRawWs('CLOB', data);
@@ -397,8 +437,17 @@
         if (data.event_type === 'book') {
           var m = markets.find(function(mk) { return mk.yesTokenId === data.asset_id; });
           if (m) {
-            var bids = (data.bids || []).slice(0, 5).map(function(b){ return { price: b.price, size: b.size }; });
-            var asks = (data.asks || []).slice(0, 5).map(function(a){ return { price: a.price, size: a.size }; });
+            function parseLevel(x) {
+              var price, size;
+              if (x && typeof x === 'object' && ('price' in x || 'size' in x)) { price = x.price; size = x.size; }
+              else if (Array.isArray(x) && x.length >= 2) { price = x[0]; size = x[1]; }
+              else return null;
+              var p = parseFloat(price), s = parseFloat(size);
+              if (p > 1 && s >= 0 && s <= 1) { var t = price; price = size; size = t; }
+              return { price: price, size: size };
+            }
+            var bids = (data.bids || []).slice(0, 10).map(parseLevel).filter(Boolean);
+            var asks = (data.asks || []).slice(0, 10).map(parseLevel).filter(Boolean);
             setMarketState(function(prev) { var n = {}; for (var k in prev) n[k] = prev[k]; n[m.conditionId] = Object.assign(prev[m.conditionId] || {}, { bids: bids, asks: asks }); return n; });
           }
           addLog('book ' + (data.asset_id || '').slice(0,10) + '...');
@@ -424,7 +473,7 @@
 
       const [selectedAsset, setSelectedAsset] = useState('BTC');
       const [selectedWindow, setSelectedWindow] = useState('now');
-      useSpotPricesRest(setSpotPrices);
+      useSpotPricesRest(updateSpotPrice);
       const spotWsStatus = useSpotWebSocket(handleSpotWs);
       const assetIds = markets.map(function(m) { return m.yesTokenId; }).filter(Boolean);
       const clobStatus = useCLOB(assetIds, handleCLOB);
@@ -466,7 +515,7 @@
       }
       return h('div', { className: 'min-h-screen', style: { background: '#0a0a0f', color: '#e8e8f0' } },
         h(Header, { clobStatus: clobStatus, spotWsStatus: spotWsStatus, msgCount: msgCount }),
-        h(SpotPriceRow, { spotPrices: spotPrices }),
+        h(SpotPriceRow, { spotPrices: spotPrices, windowPrices: windowPrices }),
         h('main', { className: 'max-w-7xl mx-auto px-4 py-6', style: { minHeight: 200 } },
           activeMarkets.length === 0
             ? h('div', { className: 'text-center py-16 rounded-xl border border-white/10 bg-[#111118]' },

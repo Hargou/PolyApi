@@ -20,8 +20,8 @@ BINANCE_URLS = [
     "https://api.binance.com",
     "https://data-api.binance.vision",
 ]
-SPOT_SYMBOLS = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "MATICUSDT", "LINKUSDT"]
-COINGECKO_IDS = {"btcusdt": "bitcoin", "ethusdt": "ethereum", "solusdt": "solana", "maticusdt": "matic-network", "linkusdt": "chainlink"}
+SPOT_SYMBOLS = ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
+COINGECKO_IDS = {"btcusdt": "bitcoin", "ethusdt": "ethereum", "solusdt": "solana"}
 
 app = FastAPI(title="Polymarket Crypto 5-Min Dashboard")
 app.mount("/static", StaticFiles(directory="static"), name="static")
