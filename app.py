@@ -27,7 +27,7 @@ app.mount("/static", StaticFiles(directory="static"), name="static")
 @app.get("/", response_class=HTMLResponse)
 async def index():
     with open("static/index.html") as f:
-        return f.read()
+        return HTMLResponse(content=f.read(), headers={"Cache-Control": "no-cache, no-store, must-revalidate"})
 
 
 @app.get("/api/events")
@@ -154,6 +154,244 @@ async def live_crypto():
     return events
 
 
+# Polymarket crypto window configs: (prefix, step_seconds)
+_CRYPTO_WINDOWS = [
+    ("btc-updown-5m", 300),
+    ("eth-updown-5m", 300),
+    ("btc-updown-10m", 600),
+    ("eth-updown-10m", 600),
+    ("btc-updown-15m", 900),
+    ("eth-updown-15m", 900),
+]
+
+
+async def _build_poly_crypto() -> List[Dict]:
+    """Polymarket-only crypto markets: 5m, 10m, 15m BTC/ETH."""
+    now = int(time.time())
+    slugs = []
+    for pfx, step in _CRYPTO_WINDOWS:
+        base = (now // step) * step
+        for offset in range(0, step * 4, step):
+            slugs.append(f"{pfx}-{base - offset}")
+            slugs.append(f"{pfx}-{base + step - offset}")
+    seen: set = set()
+    slugs = [s for s in slugs if not (s in seen or seen.add(s))]
+
+    async with httpx.AsyncClient(timeout=10) as client:
+        poly_results = await asyncio.gather(*[
+            client.get(f"{GAMMA}/events/slug/{s}") for s in slugs
+        ], return_exceptions=True)
+
+    poly_events = []
+    seen_ids: set = set()
+    for r in poly_results:
+        if isinstance(r, Exception) or r.status_code != 200:
+            continue
+        try:
+            ev = r.json()
+            if ev and ev.get("id") and not ev.get("closed") and ev["id"] not in seen_ids:
+                seen_ids.add(ev["id"])
+                poly_events.append(ev)
+        except Exception:
+            pass
+    poly_events.sort(key=lambda e: e.get("slug", ""), reverse=True)
+
+    def _asset(ev: Dict) -> str:
+        s = ev.get("slug", "")
+        return "BTC" if s.startswith("btc") else "ETH" if s.startswith("eth") else "?"
+
+    def _window(ev: Dict) -> Optional[int]:
+        parts = ev.get("slug", "").rsplit("-", 1)
+        if len(parts) == 2:
+            try: return int(parts[1])
+            except ValueError: pass
+        return None
+
+    def _step_from_slug(slug: str) -> int:
+        if "5m" in slug: return 300
+        if "10m" in slug: return 600
+        return 900
+
+    def _up_pct(ev: Dict) -> Optional[float]:
+        mkts = ev.get("markets", [])
+        if not mkts: return None
+        try:
+            prices = json.loads(mkts[0].get("outcomePrices", "[]"))
+            if prices: return round(float(prices[0]) * 100, 1)
+        except Exception: pass
+        return None
+
+    def _window_iso(ts: int) -> str:
+        from datetime import datetime, timezone
+        return datetime.fromtimestamp(ts, tz=timezone.utc).isoformat()
+
+    pairs = []
+    for pev in poly_events:
+        pw = _window(pev)
+        step = _step_from_slug(pev.get("slug", ""))
+        poly_m0 = pev.get("markets", [{}])[0] if pev.get("markets") else {}
+        pairs.append({
+            "asset": _asset(pev),
+            "window_start": _window_iso(pw) if pw else None,
+            "window_end": _window_iso(pw + step) if pw else None,
+            "window_min": step // 60,
+            "matched": False,
+            "poly": {
+                "title": pev.get("title"),
+                "slug": pev.get("slug"),
+                "yes_pct": _up_pct(pev),
+                "conditionId": poly_m0.get("conditionId"),
+            },
+            "kalshi": None,
+            "gap": None,
+        })
+
+    pairs.sort(key=lambda p: p.get("window_start") or "", reverse=True)
+    return pairs
+
+
+async def _build_crypto_pairs() -> List[Dict]:
+    """Legacy: Poly + Kalshi pairs (for /api/live-crypto-compare)."""
+    return await _build_poly_crypto()
+
+
+@app.get("/api/live-crypto-compare")
+async def live_crypto_compare():
+    """REST endpoint — one-shot snapshot."""
+    return await _build_crypto_pairs()
+
+
+@app.websocket("/ws/crypto-arb")
+async def ws_crypto_arb(ws: WebSocket):
+    """Stream live Polymarket crypto prices (5m, 10m, 15m BTC/ETH) via WebSocket."""
+    await ws.accept()
+    stop = asyncio.Event()
+
+    try:
+        await ws.send_json({"type": "connected", "ts": time.time()})
+        pairs = await _build_poly_crypto()
+        await ws.send_json({"type": "snapshot", "pairs": pairs, "ts": time.time()})
+
+        token_map: Dict[str, tuple] = {}
+        cond_to_idx: Dict[str, int] = {}
+        cids = []
+        for i, p in enumerate(pairs):
+            poly = p.get("poly")
+            if poly and poly.get("conditionId"):
+                cid = poly["conditionId"]
+                cids.append(cid)
+                cond_to_idx[cid] = i
+
+        if cids:
+            async with httpx.AsyncClient(timeout=10) as client:
+                resps = await asyncio.gather(
+                    *[client.get(f"{CLOB}/markets/{c}") for c in cids],
+                    return_exceptions=True,
+                )
+                for cid, resp in zip(cids, resps):
+                    if isinstance(resp, Exception) or resp.status_code != 200:
+                        continue
+                    mkt = resp.json()
+                    for tok in mkt.get("tokens", []):
+                        tid = tok.get("token_id")
+                        outcome = (tok.get("outcome") or "").strip()
+                        if tid and outcome in ("Yes", "Up"):
+                            token_map[tid] = (cond_to_idx[cid], outcome)
+
+        all_token_ids = list(token_map.keys())
+
+        async def poly_ws_stream():
+            if not all_token_ids:
+                return
+            try:
+                async with websockets.connect(MARKET_WS) as upstream:
+                    await upstream.send(json.dumps({
+                        "assets_ids": all_token_ids,
+                        "type": "market",
+                        "custom_feature_enabled": True,
+                    }))
+                    last_ping = time.time()
+                    while not stop.is_set():
+                        if time.time() - last_ping >= 9:
+                            await upstream.send("PING")
+                            last_ping = time.time()
+                        try:
+                            raw = await asyncio.wait_for(upstream.recv(), timeout=1)
+                        except asyncio.TimeoutError:
+                            continue
+                        if raw == "PONG":
+                            continue
+                        try:
+                            data = json.loads(raw)
+                        except Exception:
+                            continue
+                        updates = _extract_poly_prices(data, token_map, pairs)
+                        for u in updates:
+                            await ws.send_json(u)
+            except WebSocketDisconnect:
+                raise
+            except Exception:
+                pass
+
+        await poly_ws_stream()
+
+    except WebSocketDisconnect:
+        pass
+    except Exception:
+        pass
+    finally:
+        stop.set()
+
+
+def _extract_poly_prices(
+    data: Any, token_map: Dict[str, tuple], pairs: List[Dict]
+) -> List[Dict]:
+    """Parse Polymarket WS message and return price update dicts."""
+    updates = []
+
+    def _handle_event(evt: Dict):
+        if evt.get("event_type") not in ("best_bid_ask", "price_change"):
+            return
+        asset_id = evt.get("asset_id", "")
+        info = token_map.get(asset_id)
+        if not info:
+            return
+        best_bid = evt.get("best_bid")
+        best_ask = evt.get("best_ask")
+        if evt.get("price_changes"):
+            pc = evt["price_changes"][0]
+            best_bid = pc.get("best_bid", best_bid)
+            best_ask = pc.get("best_ask", best_ask)
+        if best_bid is None or best_ask is None:
+            return
+        pair_idx, _ = info
+        try:
+            mid = (float(best_bid) + float(best_ask)) / 2
+            yes_pct = round(mid * 100, 1)
+            old_pct = pairs[pair_idx].get("poly", {}).get("yes_pct")
+            if yes_pct == old_pct:
+                return
+            pairs[pair_idx].setdefault("poly", {})["yes_pct"] = yes_pct
+            updates.append({
+                "type": "price",
+                "index": pair_idx,
+                "side": "poly",
+                "yes_pct": yes_pct,
+                "best_bid": best_bid,
+                "best_ask": best_ask,
+                "ts": time.time(),
+            })
+        except (ValueError, TypeError):
+            pass
+
+    if isinstance(data, list):
+        for item in data:
+            _handle_event(item)
+    elif isinstance(data, dict):
+        _handle_event(data)
+    return updates
+
+
 # --------------- Kalshi API ---------------
 
 async def _fetch_kalshi_events(client: httpx.AsyncClient, limit: int = 400) -> List[Dict]:
@@ -216,6 +454,19 @@ def _event_text(ev: Dict, platform: str) -> str:
 
 _GENERIC = {"presidential","election","president","senator","senate","governor",
             "party","win","winner","released","price","before","country","will"}
+
+_SYNONYMS = [
+    ("democratic party", "democrats"), ("democrat party", "democrats"),
+    ("republican party", "republicans"), ("gop", "republicans"),
+    ("united states", "us"), ("u s ", "us "),
+    ("control the senate", "win the senate"), ("control the house", "win the house"),
+]
+
+def _normalize_market(text: str) -> str:
+    t = text.lower()
+    for old, new in _SYNONYMS:
+        t = t.replace(old, new)
+    return _clean(t)
 
 def _has_entity_overlap(a: str, b: str) -> bool:
     """Check if the two texts share at least one specific named entity / proper noun."""
@@ -304,6 +555,84 @@ async def compare_platforms(min_score: float = 75, poly_limit: int = 100, kalshi
             if poly_pct is not None and kalshi_pct is not None:
                 diff = round(abs(poly_pct - kalshi_pct), 1)
 
+            poly_mkts_raw = pev.get("markets", [])
+            kalshi_mkts_raw = best_kev.get("markets", [])
+
+            def _mk_poly(m):
+                return {
+                    "question": m.get("question"),
+                    "outcomes": m.get("outcomes"),
+                    "outcomePrices": m.get("outcomePrices"),
+                    "conditionId": m.get("conditionId"),
+                    "endDate": m.get("endDate"),
+                }
+
+            def _mk_kalshi(m):
+                return {
+                    "title": m.get("title"),
+                    "ticker": m.get("ticker"),
+                    "yes_bid": m.get("yes_bid"),
+                    "yes_ask": m.get("yes_ask"),
+                    "no_bid": m.get("no_bid"),
+                    "no_ask": m.get("no_ask"),
+                    "volume": m.get("volume"),
+                    "status": m.get("status"),
+                    "expiration_time": m.get("expiration_time"),
+                    "expected_expiration_time": m.get("expected_expiration_time"),
+                }
+
+            all_scores = []
+            for pi, pm in enumerate(poly_mkts_raw):
+                p_raw = _clean(pm.get("question", ""))
+                p_norm = _normalize_market(pm.get("question", ""))
+                for ki, km in enumerate(kalshi_mkts_raw):
+                    k_raw = _clean(km.get("title", ""))
+                    k_norm = _normalize_market(km.get("title", ""))
+                    s_raw = max(
+                        fuzz.token_set_ratio(p_raw, k_raw),
+                        fuzz.token_sort_ratio(p_raw, k_raw),
+                    )
+                    s_norm = max(
+                        fuzz.token_set_ratio(p_norm, k_norm),
+                        fuzz.token_sort_ratio(p_norm, k_norm),
+                    )
+                    s_strict = fuzz.ratio(p_norm, k_norm)
+                    s = max(s_raw, s_norm, int(s_strict * 0.9))
+                    if s >= 55:
+                        all_scores.append((s, pi, ki))
+            all_scores.sort(key=lambda x: x[0], reverse=True)
+
+            matched_pairs = []
+            used_p, used_k = set(), set()
+            for s, pi, ki in all_scores:
+                if pi in used_p or ki in used_k:
+                    continue
+                used_p.add(pi)
+                used_k.add(ki)
+                matched_pairs.append({
+                    "poly": _mk_poly(poly_mkts_raw[pi]),
+                    "kalshi": _mk_kalshi(kalshi_mkts_raw[ki]),
+                    "sub_score": round(s),
+                })
+
+            for pi, pm in enumerate(poly_mkts_raw):
+                if pi not in used_p:
+                    matched_pairs.append({
+                        "poly": _mk_poly(pm),
+                        "kalshi": None,
+                        "sub_score": 0,
+                    })
+
+            for ki, km in enumerate(kalshi_mkts_raw):
+                if ki not in used_k:
+                    matched_pairs.append({
+                        "poly": None,
+                        "kalshi": _mk_kalshi(km),
+                        "sub_score": 0,
+                    })
+
+            matched_pairs.sort(key=lambda x: x["sub_score"], reverse=True)
+
             matches.append({
                 "score": round(best_score),
                 "diff": diff,
@@ -313,18 +642,19 @@ async def compare_platforms(min_score: float = 75, poly_limit: int = 100, kalshi
                     "yes_pct": poly_pct,
                     "volume": pev.get("volume"),
                     "liquidity": pev.get("liquidity"),
-                    "markets_count": len(pev.get("markets", [])),
-                    "first_question": (pev.get("markets", [{}])[0].get("question") if pev.get("markets") else None),
+                    "endDate": pev.get("endDate"),
+                    "markets_count": len(poly_mkts_raw),
                 },
                 "kalshi": {
                     "title": best_kev.get("title"),
                     "event_ticker": best_kev.get("event_ticker"),
                     "category": best_kev.get("category"),
                     "yes_pct": kalshi_pct,
-                    "volume": sum(m.get("volume", 0) for m in best_kev.get("markets", [])),
-                    "markets_count": len(best_kev.get("markets", [])),
-                    "first_title": (best_kev.get("markets", [{}])[0].get("title") if best_kev.get("markets") else None),
+                    "volume": sum(m.get("volume", 0) for m in kalshi_mkts_raw),
+                    "endDate": kalshi_mkts_raw[0].get("expiration_time") if kalshi_mkts_raw else None,
+                    "markets_count": len(kalshi_mkts_raw),
                 },
+                "matched_markets": matched_pairs,
             })
 
     matches.sort(key=lambda m: (m["score"], m["diff"] or 0), reverse=True)
