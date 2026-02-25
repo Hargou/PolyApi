@@ -53,8 +53,8 @@
     const API = window.location.origin;
     const CLOB_WS = 'wss://ws-subscriptions-clob.polymarket.com/ws/market';
     const KRAKEN_SPOT_WS = 'wss://ws.kraken.com/v2';
-    const SPOT_SYMBOLS = ['btcusdt','ethusdt','solusdt'];
-    const KRAKEN_PAIRS = ['BTC/USD','ETH/USD','SOL/USD'];
+    const ASSET_TO_KRAKEN = { BTC: 'BTC/USD', ETH: 'ETH/USD', SOL: 'SOL/USD' };
+    const ASSET_TO_SYM = { BTC: 'btcusdt', ETH: 'ethusdt', SOL: 'solusdt' };
     const WINDOW_SEC = 300;
 
     function useSpotPricesRest(updateSpotPrice) {
@@ -108,18 +108,19 @@
       return { markets, loading, error, refetch: fetchMarkets };
     }
 
-    function useSpotWebSocket(onMessage) {
+    function useSpotWebSocket(selectedAsset, onMessage) {
       const [status, setStatus] = useState('disconnected');
       const wsRef = useRef(null);
       const backoffRef = useRef(1000);
-      const connect = useCallback(function() {
+      const connect = useCallback(function(asset) {
         if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) return;
+        var pair = ASSET_TO_KRAKEN[asset] || 'BTC/USD';
         setStatus('connecting');
         const ws = new WebSocket(KRAKEN_SPOT_WS);
         wsRef.current = ws;
         ws.onopen = function() {
           backoffRef.current = 1000;
-          ws.send(JSON.stringify({ method: 'subscribe', params: { channel: 'ticker', symbol: KRAKEN_PAIRS } }));
+          ws.send(JSON.stringify({ method: 'subscribe', params: { channel: 'ticker', symbol: [pair], event_trigger: 'bbo' } }));
           setStatus('connected');
         };
         ws.onmessage = function(e) {
@@ -130,26 +131,29 @@
             for (var i = 0; i < arr.length; i++) {
               var d = arr[i];
               var raw = (d.symbol || '').replace('/','').toLowerCase();
-              var sym = raw === 'btcusd' ? 'btcusdt' : raw === 'ethusd' ? 'ethusdt' : raw === 'solusd' ? 'solusdt' : raw === 'maticusd' ? 'maticusdt' : raw === 'linkusd' ? 'linkusdt' : raw + 'usdt';
-              var val = d.last != null ? d.last : (d.ask != null ? d.ask : d.bid);
-              if (sym && val != null) onMessage({ symbol: sym, value: parseFloat(val) });
+              var sym = raw === 'btcusd' ? 'btcusdt' : raw === 'ethusd' ? 'ethusdt' : raw === 'solusd' ? 'solusdt' : raw + 'usdt';
+              var bid = d.bid != null ? parseFloat(d.bid) : NaN, ask = d.ask != null ? parseFloat(d.ask) : NaN, last = d.last != null ? parseFloat(d.last) : NaN;
+              var val = (!isNaN(bid) && !isNaN(ask)) ? (bid + ask) / 2 : (!isNaN(last) ? last : (!isNaN(ask) ? ask : bid));
+              if (sym && !isNaN(val)) onMessage({ symbol: sym, value: val });
             }
           } catch (_) {}
         };
         ws.onclose = function() {
           setStatus('disconnected');
           wsRef.current = null;
-          setTimeout(connect, Math.min(backoffRef.current, 30000));
+          setTimeout(function() { connect(asset); }, Math.min(backoffRef.current, 30000));
           backoffRef.current *= 2;
         };
         ws.onerror = function() { setStatus('disconnected'); };
       }, [onMessage]);
       useEffect(function() {
-        connect();
+        if (wsRef.current) { wsRef.current.close(); wsRef.current = null; }
+        backoffRef.current = 1000;
+        connect(selectedAsset || 'BTC');
         return function() {
           if (wsRef.current) { wsRef.current.close(); wsRef.current = null; }
         };
-      }, [connect]);
+      }, [connect, selectedAsset]);
       return status;
     }
 
@@ -187,6 +191,7 @@
         ws.onerror = function() { setStatus('disconnected'); };
       }, [onMessage]);
       useEffect(function() {
+        if (wsRef.current) { wsRef.current.close(); wsRef.current = null; }
         if (assetIds && assetIds.length > 0) connect();
         pingRef.current = setInterval(function() {
           if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) wsRef.current.send('PING');
@@ -195,7 +200,7 @@
           clearInterval(pingRef.current);
           if (wsRef.current) { wsRef.current.close(); wsRef.current = null; }
         };
-      }, [connect, assetIds ? assetIds.length : 0]);
+      }, [connect, (assetIds || []).join(',')]);
       return status;
     }
 
@@ -217,8 +222,8 @@
             h('span', { className: 'flex items-center gap-1.5 px-2 py-0.5 rounded-full bg-[#00ff88]/10 text-[#00ff88] text-[10px] font-bold' },
               h('span', { className: 'w-1.5 h-1.5 rounded-full bg-[#00ff88] live-pulse' }), ' LIVE')),
           h('div', { className: 'flex items-center gap-6 font-mono text-xs' },
-            h('div', { className: 'flex items-center gap-2' }, h(StatusDot, { status: props.clobStatus }), h('span', { className: 'text-[var(--text-dim)]' }, 'CLOB')),
-            h('div', { className: 'flex items-center gap-2' }, h(StatusDot, { status: props.spotWsStatus }), h('span', { className: 'text-[var(--text-dim)]' }, 'Spot')),
+            h('div', { className: 'flex items-center gap-2', title: 'Order book, bids, asks from Polymarket CLOB WebSocket' }, h(StatusDot, { status: props.clobStatus }), h('span', { className: 'text-[var(--text-dim)]' }, 'CLOB (Polymarket)')),
+            h('div', { className: 'flex items-center gap-2', title: 'Spot prices + Now window price from Kraken WebSocket' }, h(StatusDot, { status: props.spotWsStatus }), h('span', { className: 'text-[var(--text-dim)]' }, 'Spot (Kraken)')),
             props.msgCount > 0 ? h('span', { className: 'text-[var(--text-dim)]' }, props.msgCount + ' msgs') : null,
             h('span', { className: 'text-[var(--text-dim)]' }, clock))));
     }
@@ -238,9 +243,10 @@
         h('polygon', { points: '0,' + height + ' ' + points + ' ' + w + ',' + height, fill: 'url(#spark)' }));
     }
 
-    function formatFullPrice(v) {
+    function formatFullPrice(v, sym) {
       if (v == null) return '-';
-      if (v >= 1000) return '$' + v.toLocaleString('en-US', { minimumFractionDigits: 0, maximumFractionDigits: 0 });
+      var useCents = sym && (sym.indexOf('btc') >= 0 || sym.indexOf('eth') >= 0);
+      if (v >= 1000) return '$' + v.toLocaleString('en-US', { minimumFractionDigits: useCents ? 2 : 0, maximumFractionDigits: useCents ? 2 : 0 });
       if (v >= 1) return '$' + v.toFixed(2);
       return '$' + v.toFixed(4);
     }
@@ -253,22 +259,26 @@
       var nowSec = Math.floor(Date.now() / 1000);
       var nowWindow = Math.floor(nowSec / WINDOW_SEC) * WINDOW_SEC;
       var futureWindow = nowWindow + WINDOW_SEC;
+      var sym = ASSET_TO_SYM[props.selectedAsset] || 'btcusdt';
+      var syms = [sym];
       return h('div', { className: 'max-w-7xl mx-auto px-4 py-3' },
         h('div', { className: 'rounded-xl border border-white/10 bg-[#111118]/80 backdrop-blur-sm p-4' },
           h('div', { className: 'flex flex-wrap items-center gap-8' },
-            SPOT_SYMBOLS.map(function(sym) {
-              const d = props.spotPrices[sym] || {};
-              const wp = props.windowPrices[sym] || {};
-              const symLabel = sym.replace('usdt','').toUpperCase();
-              return h('div', { key: sym, className: 'flex flex-col gap-1 min-w-[180px]' },
+            syms.map(function(s) {
+              const d = props.spotPrices[s] || {};
+              const wp = props.windowPrices[s] || {};
+              const symLabel = s.replace('usdt','').toUpperCase();
+              var pctFromNow = null;
+              if (d.value != null && wp.now != null && wp.now > 0) pctFromNow = ((d.value - wp.now) / wp.now) * 100;
+                return h('div', { key: s, className: 'flex flex-col gap-1 min-w-[180px]' },
                 h('div', { className: 'flex items-center gap-2' },
                   h('span', { className: 'text-[var(--text-dim)] text-xs font-medium' }, symLabel),
-                  h('span', { className: 'font-mono font-bold text-sm' }, formatFullPrice(d.value)),
-                  d.change != null ? h('span', { className: 'text-xs font-mono ' + (d.change >= 0 ? 'text-[#00ff88]' : 'text-[#ff3355]') }, (d.change >= 0 ? '+' : '') + d.change.toFixed(2) + '%') : null),
+                  h('span', { className: 'font-mono font-bold text-sm' }, formatFullPrice(d.value, s)),
+                  pctFromNow != null ? h('span', { className: 'text-xs font-mono ' + (pctFromNow >= 0 ? 'text-[#00ff88]' : 'text-[#ff3355]') }, (pctFromNow >= 0 ? '+' : '') + pctFromNow.toFixed(2) + '%') : null),
                 h('div', { className: 'text-[10px] text-[var(--text-dim)] font-mono' },
-                  h('span', null, 'Now ', formatTime(nowWindow), ': ', formatFullPrice(wp.now)),
+                  h('span', null, 'Now ', formatTime(nowWindow), ': ', formatFullPrice(wp.now, s)),
                   h('br'),
-                  h('span', null, 'Next ', formatTime(futureWindow), ': ', formatFullPrice(wp.future))),
+                  h('span', null, 'Next ', formatTime(futureWindow), ': ', formatFullPrice(wp.future, s))),
                 h(Sparkline, { history: d.history, value: d.value, w: 60, h: 20 }));
             }))));
     }
@@ -381,9 +391,9 @@
       }, []);
       const spotLogThrottle = useRef({ last: 0 });
       const addRawWs = useCallback(function(source, data) {
+        var now = Date.now();
         if (source === 'Spot') {
-          var now = Date.now();
-          if (now - spotLogThrottle.current.last < 1000) return;
+          if (now - spotLogThrottle.current.last < 500) return;
           spotLogThrottle.current.last = now;
         }
         setRawWsLog(function(prev) {
@@ -474,8 +484,8 @@
       const [selectedAsset, setSelectedAsset] = useState('BTC');
       const [selectedWindow, setSelectedWindow] = useState('now');
       useSpotPricesRest(updateSpotPrice);
-      const spotWsStatus = useSpotWebSocket(handleSpotWs);
-      const assetIds = markets.map(function(m) { return m.yesTokenId; }).filter(Boolean);
+      const spotWsStatus = useSpotWebSocket(selectedAsset, handleSpotWs);
+      const assetIds = markets.filter(function(m) { return m.asset === selectedAsset; }).map(function(m) { return m.yesTokenId; }).filter(Boolean);
       const clobStatus = useCLOB(assetIds, handleCLOB);
       const now = Date.now();
       const activeMarkets = markets.filter(function(m) {
@@ -515,7 +525,7 @@
       }
       return h('div', { className: 'min-h-screen', style: { background: '#0a0a0f', color: '#e8e8f0' } },
         h(Header, { clobStatus: clobStatus, spotWsStatus: spotWsStatus, msgCount: msgCount }),
-        h(SpotPriceRow, { spotPrices: spotPrices, windowPrices: windowPrices }),
+        h(SpotPriceRow, { spotPrices: spotPrices, windowPrices: windowPrices, selectedAsset: selectedAsset }),
         h('main', { className: 'max-w-7xl mx-auto px-4 py-6', style: { minHeight: 200 } },
           activeMarkets.length === 0
             ? h('div', { className: 'text-center py-16 rounded-xl border border-white/10 bg-[#111118]' },
@@ -548,10 +558,17 @@
           h('div', { className: 'rounded-xl border border-white/10 bg-[#111118] overflow-hidden', style: { maxHeight: 240 } },
             h('div', { className: 'px-4 py-2 border-b border-white/5 text-[10px] uppercase tracking-wider text-[var(--text-dim)] flex items-center justify-between' },
               h('span', null, 'WebSocket Live Feed'),
-              h('span', { className: 'font-mono' }, rawWsLog.length + ' msgs')),
+              h('span', { className: 'font-mono text-[9px]' }, 'Spot=Kraken | CLOB=Polymarket  •  ' + rawWsLog.length + ' msgs')),
             h('div', { className: 'p-2 overflow-y-auto font-mono text-[10px] space-y-1 scrollbar-thin', style: { maxHeight: 200 } },
               rawWsLog.slice(-80).reverse().map(function(l, i) {
-                var str = typeof l.data === 'object' ? JSON.stringify(l.data).slice(0, 200) + (JSON.stringify(l.data).length > 200 ? '...' : '') : String(l.data);
+                var str;
+                if (l.source === 'Spot' && l.data && l.data.symbol && l.data.value != null) {
+                  str = l.data.symbol + ' $' + parseFloat(l.data.value).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 4 });
+                } else if (l.source === 'CLOB' && l.data && l.data.event_type) {
+                  str = l.data.event_type + (l.data.asset_id ? ' ' + String(l.data.asset_id).slice(0,12) + '...' : '') + (l.data.best_bid != null ? ' bid=' + l.data.best_bid : '') + (l.data.best_ask != null ? ' ask=' + l.data.best_ask : '');
+                } else {
+                  str = typeof l.data === 'object' ? JSON.stringify(l.data).slice(0, 180) + (JSON.stringify(l.data).length > 180 ? '...' : '') : String(l.data);
+                }
                 return h('div', { key: i, className: 'text-[var(--text-dim)] break-all' },
                   h('span', { className: l.source === 'CLOB' ? 'text-amber-400' : 'text-[#00ff88]' }, '[' + l.source + ']'),
                   h('span', { className: 'text-[#7c6ef4] ml-1' }, l.ts),
