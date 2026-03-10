@@ -50,174 +50,73 @@
         return this.props.children;
       }
     }
-    const API = window.location.origin;
-    const CLOB_WS = 'wss://ws-subscriptions-clob.polymarket.com/ws/market';
-    const BINANCE_US_BASE = 'wss://stream.binance.us:9443';
-    const COINBASE_SPOT_WS = 'wss://ws-feed.exchange.coinbase.com';
-    const ASSET_TO_COINBASE = { BTC: 'BTC-USD', ETH: 'ETH-USD', SOL: 'SOL-USD' };
-    const ASSET_TO_SYM = { BTC: 'btcusdt', ETH: 'ethusdt', SOL: 'solusdt' };
+
     const WINDOW_SEC = 300;
 
-    function useSpotPricesRest(updateSpotPrice) {
+    // ---- Single backend WebSocket hook ----
+    function useBackendFeed(handlers, paused) {
+      const [status, setStatus] = useState('disconnected');
+      const wsRef = useRef(null);
+      const backoffRef = useRef(1000);
+      const handlersRef = useRef(handlers);
+      const pausedRef = useRef(paused);
+      useEffect(function() { handlersRef.current = handlers; });
+      useEffect(function() { pausedRef.current = paused; }, [paused]);
+
       useEffect(function() {
         var mounted = true;
-        function poll() {
-          if (!mounted) return;
-          fetch(API + '/api/spot-prices').then(function(r) {
-            if (!r.ok || !mounted) return;
-            return r.json();
-          }).then(function(data) {
-            if (!data || !mounted) return;
-            for (var sym in data) {
-              var d = data[sym];
-              var val = d && (d.value != null ? d.value : d);
-              if (val == null) continue;
-              val = parseFloat(val);
-              if (!isNaN(val)) updateSpotPrice(sym, val);
+        function connect() {
+          if (!mounted || pausedRef.current) return;
+          var proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+          var url = proto + '//' + location.host + '/ws/feed';
+          setStatus('connecting');
+          var ws = new WebSocket(url);
+          wsRef.current = ws;
+          ws.onopen = function() {
+            if (!mounted || pausedRef.current) { ws.close(); return; }
+            backoffRef.current = 1000;
+            setStatus('connected');
+          };
+          ws.onmessage = function(e) {
+            try {
+              var msg = JSON.parse(e.data);
+              var h = handlersRef.current;
+              if (!h) return;
+              if (msg.type === 'snapshot' && h.onSnapshot) h.onSnapshot(msg);
+              else if (msg.type === 'price' && h.onPrice) h.onPrice(msg);
+              else if (msg.type === 'clob' && h.onClob) h.onClob(msg.data);
+              else if (msg.type === 'markets_update' && h.onMarketsUpdate) h.onMarketsUpdate(msg.markets);
+            } catch (_) {}
+          };
+          ws.onclose = function() {
+            if (!mounted) return;
+            wsRef.current = null;
+            if (pausedRef.current) {
+              setStatus('paused');
+              return;
             }
-          }).catch(function(){});
+            setStatus('disconnected');
+            setTimeout(connect, Math.min(backoffRef.current, 30000));
+            backoffRef.current *= 2;
+          };
+          ws.onerror = function() {};
         }
-        poll();
-        var iv = setInterval(poll, 5000);
-        return function() { mounted = false; clearInterval(iv); };
-      }, [updateSpotPrice]);
-    }
-
-    function useMarkets5m() {
-      const [markets, setMarkets] = useState([]);
-      const [loading, setLoading] = useState(true);
-      const [error, setError] = useState(null);
-      const fetchMarkets = useCallback(async () => {
-        setLoading(true);
-        setError(null);
-        try {
-          const ctrl = new AbortController();
-          const t = setTimeout(function() { ctrl.abort(); }, 15000);
-          const r = await fetch(API + '/api/markets-5m', { signal: ctrl.signal });
-          clearTimeout(t);
-          if (!r.ok) throw new Error(r.statusText);
-          const data = await r.json();
-          setMarkets(Array.isArray(data) ? data : []);
-        } catch (e) {
-          setError(e.name === 'AbortError' ? 'Request timed out' : (e.message || 'Failed to fetch'));
-          setMarkets([]);
-        } finally {
-          setLoading(false);
-        }
-      }, []);
-      useEffect(function() { fetchMarkets(); }, [fetchMarkets]);
-      return { markets, loading, error, refetch: fetchMarkets };
-    }
-
-    function useSpotWebSocket(selectedAsset, spotSource, onMessage) {
-      const [status, setStatus] = useState('disconnected');
-      const wsRef = useRef(null);
-      const backoffRef = useRef(1000);
-      const connect = useCallback(function(asset, src) {
-        if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) return;
-        var url, subMsg;
-        var sym = (ASSET_TO_SYM[asset] || 'btcusdt').toLowerCase();
-        if (src === 'binance_us') {
-          url = BINANCE_US_BASE + '/stream?streams=' + sym + '@ticker';
-          subMsg = null;
+        if (paused) {
+          if (wsRef.current) { wsRef.current.close(); wsRef.current = null; }
+          setStatus('paused');
         } else {
-          url = COINBASE_SPOT_WS;
-          subMsg = JSON.stringify({ type: 'subscribe', product_ids: [ASSET_TO_COINBASE[asset] || 'BTC-USD'], channels: ['ticker'] });
+          connect();
         }
-        setStatus('connecting');
-        const ws = new WebSocket(url);
-        wsRef.current = ws;
-        ws.onopen = function() {
-          backoffRef.current = 1000;
-          if (subMsg) ws.send(subMsg);
-          setStatus('connected');
-        };
-        ws.onmessage = function(e) {
-          try {
-            var msg = JSON.parse(e.data);
-            var out = null;
-            if (src === 'binance_us') {
-              var d = msg.data || msg;
-              var stream = msg.stream || '';
-              if ((stream.indexOf('@ticker') >= 0 || d.e === '24hrTicker') && (d.c != null || d.p != null)) {
-                out = { symbol: (d.s || stream.split('@')[0] || '').toLowerCase(), value: parseFloat(d.c || d.p || 0) };
-              }
-            } else if (msg.type === 'ticker' && msg.price != null) {
-              var pid = (msg.product_id || '').replace('-','').toLowerCase();
-              var s = pid === 'btcusd' ? 'btcusdt' : pid === 'ethusd' ? 'ethusdt' : pid === 'solusd' ? 'solusdt' : null;
-              if (s) out = { symbol: s, value: parseFloat(msg.price) };
-            }
-            if (out && out.symbol && !isNaN(out.value)) onMessage(out);
-          } catch (_) {}
-        };
-        ws.onclose = function() {
-          setStatus('disconnected');
-          wsRef.current = null;
-          setTimeout(function() { connect(asset, src); }, Math.min(backoffRef.current, 30000));
-          backoffRef.current *= 2;
-        };
-        ws.onerror = function() { setStatus('disconnected'); };
-      }, [onMessage]);
-      useEffect(function() {
-        if (wsRef.current) { wsRef.current.close(); wsRef.current = null; }
-        backoffRef.current = 1000;
-        connect(selectedAsset || 'BTC', spotSource || 'binance_us');
         return function() {
+          mounted = false;
           if (wsRef.current) { wsRef.current.close(); wsRef.current = null; }
         };
-      }, [connect, selectedAsset, spotSource]);
-      return status;
-    }
-
-    function useCLOB(assetIds, onMessage) {
-      const [status, setStatus] = useState('disconnected');
-      const wsRef = useRef(null);
-      const pingRef = useRef(null);
-      const backoffRef = useRef(1000);
-      const idsRef = useRef(assetIds);
-      useEffect(function() { idsRef.current = assetIds; }, [assetIds]);
-      const connect = useCallback(function() {
-        const ids = idsRef.current;
-        if (!ids || ids.length === 0) return;
-        if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) return;
-        setStatus('connecting');
-        const ws = new WebSocket(CLOB_WS);
-        wsRef.current = ws;
-        ws.onopen = function() {
-          setStatus('connected');
-          backoffRef.current = 1000;
-          ws.send(JSON.stringify({ assets_ids: ids, type: 'market', custom_feature_enabled: true }));
-        };
-        ws.onmessage = function(e) {
-          try {
-            const data = JSON.parse(e.data);
-            onMessage(data);
-          } catch (_) {}
-        };
-        ws.onclose = function() {
-          setStatus('disconnected');
-          wsRef.current = null;
-          setTimeout(connect, Math.min(backoffRef.current, 30000));
-          backoffRef.current *= 2;
-        };
-        ws.onerror = function() { setStatus('disconnected'); };
-      }, [onMessage]);
-      useEffect(function() {
-        if (wsRef.current) { wsRef.current.close(); wsRef.current = null; }
-        if (assetIds && assetIds.length > 0) connect();
-        pingRef.current = setInterval(function() {
-          if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) wsRef.current.send('PING');
-        }, 10000);
-        return function() {
-          clearInterval(pingRef.current);
-          if (wsRef.current) { wsRef.current.close(); wsRef.current = null; }
-        };
-      }, [connect, (assetIds || []).join(',')]);
+      }, [paused]);
       return status;
     }
 
     function StatusDot(props) {
-      const color = props.status === 'connected' ? 'bg-[#00ff88]' : props.status === 'connecting' ? 'bg-amber-400' : 'bg-[#ff3355]';
+      const color = props.status === 'connected' ? 'bg-[#00ff88]' : props.status === 'connecting' ? 'bg-amber-400' : props.status === 'paused' ? 'bg-gray-500' : 'bg-[#ff3355]';
       return h('span', { className: 'w-2 h-2 rounded-full ' + color + (props.status === 'connected' ? ' live-pulse' : '') });
     }
 
@@ -231,23 +130,18 @@
         h('div', { className: 'max-w-7xl mx-auto px-4 py-3 flex items-center justify-between' },
           h('div', { className: 'flex items-center gap-4' },
             h('h1', { className: 'text-lg font-bold tracking-tight' }, 'Polymarket ', h('span', { className: 'text-[#7c6ef4]' }, '5-Min Crypto'), ' Terminal'),
-            h('span', { className: 'flex items-center gap-1.5 px-2 py-0.5 rounded-full bg-[#00ff88]/10 text-[#00ff88] text-[10px] font-bold' },
-              h('span', { className: 'w-1.5 h-1.5 rounded-full bg-[#00ff88] live-pulse' }), ' LIVE')),
+            props.feedPaused
+              ? h('span', { className: 'flex items-center gap-1.5 px-2 py-0.5 rounded-full bg-gray-500/20 text-gray-400 text-[10px] font-bold' },
+                  h('span', { className: 'w-1.5 h-1.5 rounded-full bg-gray-500' }), ' PAUSED')
+              : h('span', { className: 'flex items-center gap-1.5 px-2 py-0.5 rounded-full bg-[#00ff88]/10 text-[#00ff88] text-[10px] font-bold' },
+                  h('span', { className: 'w-1.5 h-1.5 rounded-full bg-[#00ff88] live-pulse' }), ' LIVE')),
           h('div', { className: 'flex items-center gap-6 font-mono text-xs' },
-            h('div', { className: 'flex items-center gap-2', title: 'Order book, bids, asks from Polymarket CLOB WebSocket' }, h(StatusDot, { status: props.clobStatus }), h('span', { className: 'text-[var(--text-dim)]' }, 'CLOB'), h('span', { className: 'text-[#00ff88] font-mono text-[10px]' }, props.wsStats && props.wsStats.clob ? props.wsStats.clob + '/s' : '-')),
-            h('div', { className: 'flex items-center gap-2' },
-              h(StatusDot, { status: props.spotWsStatus }),
-              h('span', { className: 'text-[var(--text-dim)]' }, 'Spot'),
-              h('div', { className: 'flex rounded-lg overflow-hidden border border-white/10' },
-                h('button', {
-                  onClick: function() { props.setSpotSource && props.setSpotSource('binance_us'); },
-                  className: 'px-2 py-1 text-[10px] font-mono ' + (props.spotSource === 'binance_us' ? 'bg-[#7c6ef4] text-white' : 'bg-white/5 text-[var(--text-dim)] hover:bg-white/10')
-                }, 'Binance US'),
-                h('button', {
-                  onClick: function() { props.setSpotSource && props.setSpotSource('coinbase'); },
-                  className: 'px-2 py-1 text-[10px] font-mono ' + (props.spotSource === 'coinbase' ? 'bg-[#7c6ef4] text-white' : 'bg-white/5 text-[var(--text-dim)] hover:bg-white/10')
-                }, 'Coinbase')),
-              h('span', { className: 'text-[#00ff88] font-mono text-[10px]' }, props.wsStats && props.wsStats.spot ? props.wsStats.spot + '/s' : '-')),
+            h('div', { className: 'flex items-center gap-2' }, h(StatusDot, { status: props.feedStatus }), h('span', { className: 'text-[var(--text-dim)]' }, 'Feed')),
+            h('button', {
+              onClick: props.onPauseResume,
+              className: 'px-3 py-1 rounded-lg text-xs font-medium transition ' + (props.feedPaused ? 'bg-[#00ff88]/20 text-[#00ff88] hover:bg-[#00ff88]/30' : 'bg-white/5 text-[var(--text-dim)] hover:bg-white/10'),
+              title: props.feedPaused ? 'Resume feed' : 'Pause feed (save resources)'
+            }, props.feedPaused ? 'Resume' : 'Pause'),
             props.msgCount > 0 ? h('span', { className: 'text-[var(--text-dim)]' }, props.msgCount + ' msgs') : null,
             h('span', { className: 'text-[var(--text-dim)]' }, clock))));
     }
@@ -258,6 +152,7 @@
       var arr = [...(props.history || []), props.value].filter(function(v) { return v != null; }).slice(-maxPoints);
       if (arr.length < 2) return null;
       var w = props.w || 80, height = props.h || 24;
+      var fullWidth = props.fullWidth;
       var min = Math.min.apply(null, arr), max = Math.max.apply(null, arr);
       var range = Math.max(max - min, (min + max) / 2 * 0.0001);
       var pad = 2;
@@ -268,9 +163,19 @@
         return x + ',' + y;
       }).join(' ');
       var dir = arr[arr.length - 1] >= arr[0] ? '#00ff88' : '#ff3355';
-      return h('svg', { width: w, height: height, className: 'shrink-0 rounded', style: { background: 'rgba(0,0,0,0.2)' } },
+      // Open price reference line
+      var openY = null;
+      if (props.openPrice != null) {
+        openY = pad + plotH - ((props.openPrice - min) / range) * plotH;
+        openY = Math.max(pad, Math.min(height - pad, openY));
+      }
+      var svgProps = fullWidth
+        ? { viewBox: '0 0 ' + w + ' ' + height, preserveAspectRatio: 'none', className: 'w-full rounded-lg', style: { height: height, background: 'rgba(0,0,0,0.25)' } }
+        : { width: w, height: height, className: 'shrink-0 rounded', style: { background: 'rgba(0,0,0,0.2)' } };
+      return h('svg', svgProps,
         h('defs', null, h('linearGradient', { id: gradId, x1: 0, y1: 0, x2: 0, y2: 1 }, h('stop', { offset: '0%', stopColor: dir, stopOpacity: 0.35 }), h('stop', { offset: '100%', stopColor: dir, stopOpacity: 0 }))),
         h('polygon', { points: pad + ',' + height + ' ' + points + ' ' + (w - pad) + ',' + height, fill: 'url(#' + gradId + ')' }),
+        openY != null ? h('line', { x1: pad, y1: openY, x2: w - pad, y2: openY, stroke: 'rgba(124,110,244,0.5)', strokeWidth: 1, strokeDasharray: '4 3' }) : null,
         h('polyline', { points: points, fill: 'none', stroke: dir, strokeWidth: 1.5, strokeLinecap: 'round', strokeLinejoin: 'round' }));
     }
 
@@ -281,45 +186,69 @@
       if (v >= 1) return '$' + v.toFixed(2);
       return '$' + v.toFixed(4);
     }
-    function formatTime(ts) {
+    function formatTimeShort(ts) {
       if (!ts) return '';
       var d = new Date(ts * 1000);
-      return d.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', second: '2-digit', hour12: true });
+      return d.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true });
     }
+    function fmtMmSs(totalSec) {
+      var m = Math.floor(totalSec / 60);
+      var s = totalSec % 60;
+      return m + ':' + String(s).padStart(2, '0');
+    }
+
+    var ASSET_TO_SYM = { BTC: 'btcusdt', ETH: 'ethusdt', SOL: 'solusdt' };
+
     function SpotPriceRow(props) {
+      var [tick, setTick] = useState(0);
+      useEffect(function() {
+        var iv = setInterval(function() { setTick(function(t) { return t + 1; }); }, 1000);
+        return function() { clearInterval(iv); };
+      }, []);
       var nowSec = Math.floor(Date.now() / 1000);
-      var nowWindow = Math.floor(nowSec / WINDOW_SEC) * WINDOW_SEC;
-      var futureWindow = nowWindow + WINDOW_SEC;
+      var windowStart = Math.floor(nowSec / WINDOW_SEC) * WINDOW_SEC;
+      var windowEnd = windowStart + WINDOW_SEC;
+      var elapsed = nowSec - windowStart;
+      var progress = elapsed / WINDOW_SEC;
       var sym = ASSET_TO_SYM[props.selectedAsset] || 'btcusdt';
-      var syms = [sym];
+
+      var d = props.spotPrices[sym] || {};
+      var wp = props.windowPrices[sym] || {};
+      var symLabel = sym.replace('usdt','').toUpperCase();
+      var openPrice = wp.now;
+      var pctFromOpen = null;
+      if (d.value != null && openPrice != null && openPrice > 0) pctFromOpen = ((d.value - openPrice) / openPrice) * 100;
+
+      var winPrices = (d.windowHistory || []).slice().sort(function(a,b){ return a.t - b.t; }).map(function(x){ return x.price; });
+      var chartArr = [].concat(winPrices, d.value != null ? [d.value] : []).filter(function(v){ return v != null; });
+
       return h('div', { className: 'max-w-7xl mx-auto px-4 py-3' },
         h('div', { className: 'rounded-xl border border-white/10 bg-[#111118]/80 backdrop-blur-sm p-4' },
-          h('div', { className: 'flex flex-wrap items-center gap-8' },
-            syms.map(function(s) {
-              const d = props.spotPrices[s] || {};
-              const wp = props.windowPrices[s] || {};
-              const symLabel = s.replace('usdt','').toUpperCase();
-              var pctFromNow = null;
-              if (d.value != null && wp.now != null && wp.now > 0) pctFromNow = ((d.value - wp.now) / wp.now) * 100;
-                return h('div', { key: s, className: 'flex flex-col gap-1.5 min-w-[200px]' },
-                h('div', { className: 'flex items-center gap-2' },
-                  h('span', { className: 'text-[var(--text-dim)] text-xs font-medium' }, symLabel),
-                  h('span', { className: 'font-mono font-bold text-sm' }, formatFullPrice(d.value, s)),
-                  pctFromNow != null ? h('span', { className: 'text-xs font-mono ' + (pctFromNow >= 0 ? 'text-[#00ff88]' : 'text-[#ff3355]') }, (pctFromNow >= 0 ? '+' : '') + pctFromNow.toFixed(2) + '%') : null),
-                h('div', { className: 'text-[10px] text-[var(--text-dim)] font-mono' },
-                  h('span', null, 'Now ', formatTime(nowWindow), ': ', formatFullPrice(wp.now, s)),
-                  h('br'),
-                  h('span', null, 'Next ', formatTime(futureWindow), ': ', formatFullPrice(wp.future, s))),
-                h('div', { className: 'flex flex-col gap-1' },
-                  h('div', { className: 'text-[10px] text-[var(--text-dim)] font-mono' }, '5m window  •  ' + (Math.floor(Date.now()/1000) - Math.floor(Date.now()/1000/WINDOW_SEC)*WINDOW_SEC) + 's elapsed'),
-                  (function() {
-                    var winPrices = (d.windowHistory || []).slice().sort(function(a,b){ return a.t - b.t; }).map(function(x){ return x.price; });
-                    var arr = [...winPrices, d.value].filter(function(v){ return v != null; });
-                    if (arr.length < 2) return h('div', { className: 'rounded flex items-center justify-center', style: { width: 320, height: 80, background: 'rgba(0,0,0,0.2)' } }, h('span', { className: 'text-[10px] text-[var(--text-dim)]' }, 'Waiting for data...'));
-                    return h(Sparkline, { id: 'window-' + s, history: winPrices, value: d.value, w: 320, h: 80, maxPoints: 500 });
-                  })()),
-                h(Sparkline, { id: 'tick-' + s, history: d.history, value: d.value, w: 80, h: 28 }));
-            }))));
+          // Row 1: asset label, live price, % change from open
+          h('div', { className: 'flex items-center gap-3 mb-3' },
+            h('span', { className: 'text-xs font-bold px-2 py-0.5 rounded bg-white/5 text-[var(--text-dim)]' }, symLabel),
+            h('span', { className: 'font-mono font-bold text-xl' }, formatFullPrice(d.value, sym)),
+            pctFromOpen != null ? h('span', { className: 'text-sm font-mono font-semibold ' + (pctFromOpen >= 0 ? 'text-[#00ff88]' : 'text-[#ff3355]') }, (pctFromOpen >= 0 ? '+' : '') + pctFromOpen.toFixed(3) + '%') : null,
+            pctFromOpen != null ? h('span', { className: 'text-[10px] text-[var(--text-dim)]' }, 'from open') : null),
+
+          // Row 2: window info
+          h('div', { className: 'flex items-center gap-4 mb-3 text-xs font-mono' },
+            h('span', { className: 'text-[var(--text-dim)]' }, formatTimeShort(windowStart), ' \u2013 ', formatTimeShort(windowEnd)),
+            h('span', { className: 'text-[var(--text-dim)]' }, '|'),
+            h('span', { className: 'text-[var(--text-dim)]' }, 'Open: ', h('span', { className: 'text-[var(--text)]' }, formatFullPrice(openPrice, sym)))),
+
+          // Row 3: progress bar
+          h('div', { className: 'mb-3' },
+            h('div', { className: 'flex items-center gap-2 mb-1' },
+              h('span', { className: 'text-[10px] text-[var(--text-dim)] font-mono' }, fmtMmSs(elapsed) + ' / 5:00')),
+            h('div', { className: 'w-full h-1.5 rounded-full bg-white/5 overflow-hidden' },
+              h('div', { className: 'h-full rounded-full transition-all', style: { width: (progress * 100) + '%', background: pctFromOpen != null ? (pctFromOpen >= 0 ? '#00ff88' : '#ff3355') : '#7c6ef4' } }))),
+
+          // Row 4: sparkline chart (full width)
+          (function() {
+            if (chartArr.length < 2) return h('div', { className: 'rounded-lg flex items-center justify-center', style: { width: '100%', height: 100, background: 'rgba(0,0,0,0.25)' } }, h('span', { className: 'text-xs text-[var(--text-dim)]' }, 'Waiting for price data...'));
+            return h(Sparkline, { id: 'window-' + sym, history: winPrices, value: d.value, w: 800, h: 110, maxPoints: 500, fullWidth: true, openPrice: openPrice });
+          })()));
     }
 
     function ProbabilityGauge(props) {
@@ -416,21 +345,22 @@
     }
 
     function App() {
-      const { markets, loading, error, refetch } = useMarkets5m();
+      const [markets, setMarkets] = useState([]);
       const [spotPrices, setSpotPrices] = useState({});
       const [windowPrices, setWindowPrices] = useState({});
       const priceAtWindowRef = useRef({});
       const lastWindowRef = useRef({});
-      const spotMsgCountRef = useRef({ count: 0, lastReset: Date.now() });
-      const clobMsgCountRef = useRef({ count: 0, lastReset: Date.now() });
-      const [wsStats, setWsStats] = useState({ spot: 0, clob: 0 });
       const [marketState, setMarketState] = useState({});
       const [activityLog, setActivityLog] = useState([]);
       const [rawWsLog, setRawWsLog] = useState([]);
       const [msgCount, setMsgCount] = useState(0);
+      const marketsRef = useRef(markets);
+      useEffect(function() { marketsRef.current = markets; }, [markets]);
+
       const addLog = useCallback(function(msg) {
         setActivityLog(function(prev) { return prev.slice(-99).concat([{ ts: new Date().toLocaleTimeString(), msg: msg }]); });
       }, []);
+
       const spotLogThrottle = useRef({ last: 0 });
       const addRawWs = useCallback(function(source, data) {
         var now = Date.now();
@@ -443,6 +373,7 @@
           return prev.slice(-199).concat([entry]);
         });
       }, []);
+
       const updateSpotPrice = useCallback(function(sym, val) {
         if (!sym || val == null || isNaN(val)) return;
         var nowSec = Math.floor(Date.now() / 1000);
@@ -473,19 +404,14 @@
           });
         }
       }, []);
-      const handleSpotWs = useCallback(function(msg) {
-        if (!msg.symbol || msg.value == null || isNaN(msg.value)) return;
-        spotMsgCountRef.current.count++;
-        addRawWs('Spot', msg);
-        updateSpotPrice(msg.symbol, msg.value);
-      }, [addRawWs, updateSpotPrice]);
+
       const handleCLOB = useCallback(function(data) {
         if (Array.isArray(data)) { data.forEach(handleCLOB); return; }
-        clobMsgCountRef.current.count++;
         addRawWs('CLOB', data);
         setMsgCount(function(c) { return c + 1; });
+        var currentMarkets = marketsRef.current;
         function processAsset(assetId, bestBid, bestAsk, price, side, size) {
-          var m = markets.find(function(mk) { return mk.yesTokenId === assetId; });
+          var m = currentMarkets.find(function(mk) { return mk.yesTokenId === assetId; });
           if (!m) return;
           setMarketState(function(prev) {
             var cur = prev[m.conditionId] || {};
@@ -496,7 +422,7 @@
           });
         }
         if (data.event_type === 'book') {
-          var m = markets.find(function(mk) { return mk.yesTokenId === data.asset_id; });
+          var m = currentMarkets.find(function(mk) { return mk.yesTokenId === data.asset_id; });
           if (m) {
             function parseLevel(x) {
               var price, size;
@@ -530,29 +456,40 @@
           var p = pcs[i];
           processAsset(p.asset_id, p.best_bid, p.best_ask, p.price, p.side, p.size);
         }
-      }, [markets, addLog, addRawWs]);
+      }, [addLog, addRawWs]);
+
+      const [feedPaused, setFeedPaused] = useState(false);
+
+      // -- Single backend feed --
+      const feedStatus = useBackendFeed({
+        onSnapshot: function(msg) {
+          if (msg.prices) {
+            for (var sym in msg.prices) {
+              var p = msg.prices[sym];
+              if (p && p.value != null) updateSpotPrice(sym, p.value);
+            }
+          }
+          if (msg.markets) setMarkets(msg.markets);
+          addLog('snapshot received');
+        },
+        onPrice: function(msg) {
+          if (msg.symbol && msg.value != null) {
+            updateSpotPrice(msg.symbol, msg.value);
+            addRawWs('Spot', msg);
+          }
+        },
+        onClob: function(data) {
+          handleCLOB(data);
+        },
+        onMarketsUpdate: function(mkts) {
+          setMarkets(mkts);
+          addLog('markets updated (' + mkts.length + ')');
+        }
+      }, feedPaused);
 
       const [selectedAsset, setSelectedAsset] = useState('BTC');
       const [selectedWindow, setSelectedWindow] = useState('now');
-      const [spotSource, setSpotSource] = useState('binance_us');
-      useSpotPricesRest(updateSpotPrice);
-      const spotWsStatus = useSpotWebSocket(selectedAsset, spotSource, handleSpotWs);
-      const assetIds = markets.filter(function(m) { return m.asset === selectedAsset; }).map(function(m) { return m.yesTokenId; }).filter(Boolean);
-      const clobStatus = useCLOB(assetIds, handleCLOB);
-      useEffect(function() {
-        var iv = setInterval(function() {
-          var now = Date.now();
-          var spotEl = (now - spotMsgCountRef.current.lastReset) / 1000;
-          var clobEl = (now - clobMsgCountRef.current.lastReset) / 1000;
-          setWsStats({
-            spot: spotEl > 0 ? (spotMsgCountRef.current.count / spotEl).toFixed(1) : 0,
-            clob: clobEl > 0 ? (clobMsgCountRef.current.count / clobEl).toFixed(1) : 0
-          });
-          spotMsgCountRef.current = { count: 0, lastReset: now };
-          clobMsgCountRef.current = { count: 0, lastReset: now };
-        }, 2000);
-        return function() { clearInterval(iv); };
-      }, []);
+
       const now = Date.now();
       const activeMarkets = markets.filter(function(m) {
         var end = new Date(m.endDate || 0).getTime();
@@ -579,25 +516,19 @@
         }
       }, [activeMarkets.length]);
 
-      if (loading && markets.length === 0) {
+      if (feedStatus === 'connecting' && markets.length === 0) {
         return h('div', { className: 'min-h-screen flex flex-col items-center justify-center gap-4', style: { background: '#0a0a0f' } },
           h('div', { className: 'w-10 h-10 border-2 border-[#7c6ef4] border-t-transparent rounded-full spin' }),
-          h('p', { className: 'text-[var(--text-dim)]' }, 'Loading 5-min markets...'));
-      }
-      if (error && markets.length === 0) {
-        return h('div', { className: 'min-h-screen flex flex-col items-center justify-center gap-4', style: { background: '#0a0a0f' } },
-          h('p', { className: 'text-[#ff3355]' }, 'Failed to load markets: ' + error),
-          h('button', { onClick: refetch, className: 'px-4 py-2 rounded-lg bg-[#7c6ef4] hover:bg-[#6b5ce7] text-white font-medium' }, 'Retry'));
+          h('p', { className: 'text-[var(--text-dim)]' }, 'Connecting to feed...'));
       }
       return h('div', { className: 'min-h-screen', style: { background: '#0a0a0f', color: '#e8e8f0' } },
-        h(Header, { clobStatus: clobStatus, spotWsStatus: spotWsStatus, msgCount: msgCount, wsStats: wsStats, spotSource: spotSource, setSpotSource: setSpotSource }),
+        h(Header, { feedStatus: feedStatus, msgCount: msgCount, feedPaused: feedPaused, onPauseResume: function() { setFeedPaused(function(p) { return !p; }); } }),
         h(SpotPriceRow, { spotPrices: spotPrices, windowPrices: windowPrices, selectedAsset: selectedAsset }),
         h('main', { className: 'max-w-7xl mx-auto px-4 py-6', style: { minHeight: 200 } },
           activeMarkets.length === 0
             ? h('div', { className: 'text-center py-16 rounded-xl border border-white/10 bg-[#111118]' },
                 h('p', { className: 'text-[var(--text-dim)] mb-4' }, 'No active 5-min crypto markets right now.'),
-                h('p', { className: 'text-xs text-[var(--text-dim)] mb-4' }, 'New markets appear every 5 minutes. Try again soon.'),
-                h('button', { onClick: refetch, className: 'px-4 py-2 rounded-lg bg-[#7c6ef4] hover:bg-[#6b5ce7] text-white text-sm' }, 'Retry'))
+                h('p', { className: 'text-xs text-[var(--text-dim)] mb-4' }, 'New markets appear every 5 minutes. Try again soon.'))
             : h('div', { className: 'max-w-xl mx-auto' },
                 h('div', { className: 'flex flex-wrap items-center gap-2 mb-4' },
                   ['BTC','ETH','SOL'].map(function(a) {
@@ -624,7 +555,7 @@
           h('div', { className: 'rounded-xl border border-white/10 bg-[#111118] overflow-hidden', style: { maxHeight: 240 } },
             h('div', { className: 'px-4 py-2 border-b border-white/5 text-[10px] uppercase tracking-wider text-[var(--text-dim)] flex items-center justify-between' },
               h('span', null, 'WebSocket Live Feed'),
-              h('span', { className: 'font-mono text-[9px]' }, 'Spot=Kraken | CLOB=Polymarket  •  ' + rawWsLog.length + ' msgs')),
+              h('span', { className: 'font-mono text-[9px]' }, 'Backend Feed  •  ' + rawWsLog.length + ' msgs')),
             h('div', { className: 'p-2 overflow-y-auto font-mono text-[10px] space-y-1 scrollbar-thin', style: { maxHeight: 200 } },
               rawWsLog.slice(-80).reverse().map(function(l, i) {
                 var str;

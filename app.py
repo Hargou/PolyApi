@@ -1,31 +1,88 @@
 """
 Polymarket Crypto 5-Min Prediction Dashboard — FastAPI backend
-Proxies Gamma/CLOB APIs and serves the terminal UI.
+Server-side engines for spot prices, market discovery, and CLOB streaming.
+Single /ws/feed endpoint pushes unified stream to browser.
 """
 
 import asyncio
-import json
+import logging
 import time
-from typing import List, Dict, Optional
+from contextlib import asynccontextmanager
 
 import httpx
-from fastapi import FastAPI
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 
-GAMMA = "https://gamma-api.polymarket.com"
-CLOB = "https://clob.polymarket.com"
-# Binance may be geo-blocked; CoinGecko used as primary for spot prices
-BINANCE_URLS = [
-    "https://api.binance.com",
-    "https://data-api.binance.vision",
-]
-SPOT_SYMBOLS = ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
-COINGECKO_IDS = {"btcusdt": "bitcoin", "ethusdt": "ethereum", "solusdt": "solana"}
+from engines.price_engine import PriceEngine
+from engines.market_engine import MarketEngine
+from engines.feed import Feed
 
-app = FastAPI(title="Polymarket Crypto 5-Min Dashboard")
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
+log = logging.getLogger(__name__)
+
+CLOB = "https://clob.polymarket.com"
+
+# -- Shared instances --
+feed = Feed()
+price_engine = PriceEngine()
+market_engine = MarketEngine()
+
+
+# -- Engine callbacks wired to feed --
+
+def on_price(sym: str, value: float, ts: int):
+    """Called by PriceEngine on each spot price tick."""
+    feed.update_snapshot_prices(price_engine.prices)
+    asyncio.create_task(feed.broadcast({
+        "type": "price",
+        "symbol": sym,
+        "value": value,
+        "ts": ts,
+    }))
+
+
+def on_market_event(data):
+    """Called by MarketEngine for each CLOB WebSocket message."""
+    asyncio.create_task(feed.broadcast({
+        "type": "clob",
+        "data": data,
+    }))
+
+
+def on_markets_update(markets: list):
+    """Called by MarketEngine when the market list is refreshed."""
+    feed.update_snapshot_markets(markets)
+    asyncio.create_task(feed.broadcast({
+        "type": "markets_update",
+        "markets": markets,
+    }))
+
+
+# -- Wire callbacks --
+price_engine._on_price = on_price
+market_engine._on_market_event = on_market_event
+market_engine._on_markets_update = on_markets_update
+
+
+# -- App lifespan --
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    await price_engine.start()
+    await market_engine.start()
+    log.info("All engines started")
+    yield
+    await price_engine.stop()
+    await market_engine.stop()
+    log.info("All engines stopped")
+
+
+app = FastAPI(title="Polymarket Crypto 5-Min Dashboard", lifespan=lifespan)
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
+
+# -- Routes --
 
 @app.get("/", response_class=HTMLResponse)
 async def index():
@@ -33,149 +90,32 @@ async def index():
         return HTMLResponse(content=f.read(), headers={"Cache-Control": "no-cache, no-store, must-revalidate"})
 
 
-def _asset_from_slug(slug: str) -> str:
-    s = (slug or "").lower()
-    if s.startswith("btc"): return "BTC"
-    if s.startswith("eth"): return "ETH"
-    if s.startswith("sol"): return "SOL"
-    if s.startswith("matic"): return "MATIC"
-    if s.startswith("link"): return "LINK"
-    return "?"
+@app.websocket("/ws/feed")
+async def ws_feed(ws: WebSocket):
+    """Single browser WebSocket — receives unified stream from all engines."""
+    await feed.connect(ws)
+    try:
+        while True:
+            # Keep connection alive; ignore any client messages
+            await ws.receive_text()
+    except WebSocketDisconnect:
+        pass
+    finally:
+        feed.disconnect(ws)
 
 
-async def _fetch_5m_markets() -> List[Dict]:
-    """Fetch active 5-min crypto markets from Gamma, resolve CLOB token IDs."""
-    now = int(time.time())
-    # 5-min windows: btc, eth, sol (Polymarket may have these)
-    prefixes = ["btc-updown-5m", "eth-updown-5m", "sol-updown-5m"]
-    step = 300
-    slugs = []
-    for pfx in prefixes:
-        base = (now // step) * step
-        for offset in range(0, step * 4, step):
-            slugs.append(f"{pfx}-{base - offset}")
-            slugs.append(f"{pfx}-{base + step - offset}")
-    seen = set()
-    slugs = [s for s in slugs if not (s in seen or seen.add(s))]
-
-    async with httpx.AsyncClient(timeout=10) as client:
-        results = await asyncio.gather(*[
-            client.get(f"{GAMMA}/events/slug/{s}") for s in slugs
-        ], return_exceptions=True)
-
-    events = []
-    seen_ids = set()
-    for r in results:
-        if isinstance(r, Exception) or r.status_code != 200:
-            continue
-        try:
-            ev = r.json()
-            if ev and ev.get("id") and not ev.get("closed") and ev["id"] not in seen_ids:
-                seen_ids.add(ev["id"])
-                events.append(ev)
-        except Exception:
-            pass
-
-    events.sort(key=lambda e: e.get("slug", ""), reverse=True)
-
-    # Resolve CLOB token IDs for Yes/Up outcome
-    markets_out = []
-    for ev in events:
-        mkts = ev.get("markets", [])
-        if not mkts:
-            continue
-        m0 = mkts[0]
-        cid = m0.get("conditionId")
-        if not cid:
-            continue
-
-        try:
-            async with httpx.AsyncClient(timeout=5) as c:
-                clob_r = await c.get(f"{CLOB}/markets/{cid}")
-            if clob_r.status_code != 200:
-                continue
-            clob = clob_r.json()
-            if clob.get("accepting_orders") is False:
-                continue
-            yes_token_id = None
-            for tok in clob.get("tokens", []):
-                outcome = (tok.get("outcome") or "").strip()
-                if outcome in ("Yes", "Up"):
-                    yes_token_id = tok.get("token_id")
-                    break
-            if not yes_token_id:
-                continue
-        except Exception:
-            continue
-
-        slug = ev.get("slug", "")
-        pw = None
-        parts = slug.rsplit("-", 1)
-        if len(parts) == 2:
-            try:
-                pw = int(parts[1])
-            except ValueError:
-                pass
-
-        from datetime import datetime, timezone
-        def _iso(ts):
-            return datetime.fromtimestamp(ts, tz=timezone.utc).isoformat() if ts else None
-
-        end_ts = pw + step if pw else None
-        end_iso = _iso(end_ts) if end_ts else ev.get("endDate")
-        # Skip expired markets
-        if end_ts and end_ts < now:
-            continue
-        vol = float(m0.get("volume") or ev.get("volume") or 0)
-        liq = float(m0.get("liquidity") or ev.get("liquidity") or 0)
-        yes_pct = None
-        try:
-            prices = json.loads(m0.get("outcomePrices") or "[]")
-            if prices:
-                yes_pct = round(float(prices[0]) * 100, 1)
-        except Exception:
-            pass
-        markets_out.append({
-            "id": ev.get("id"),
-            "question": ev.get("title") or m0.get("question", ""),
-            "conditionId": cid,
-            "yesTokenId": yes_token_id,
-            "asset": _asset_from_slug(slug),
-            "slug": slug,
-            "endDate": end_iso,
-            "volume": vol,
-            "liquidity": liq,
-            "yes_pct": yes_pct,
-        })
-
-    markets_out.sort(key=lambda m: (m.get("endDate") or ""), reverse=True)
-    return markets_out
-
+# -- Debug REST endpoints (read from engine state) --
 
 @app.get("/api/markets-5m")
 async def get_markets_5m():
-    """5-min crypto prediction markets with CLOB token IDs for WebSocket subscription."""
-    return await _fetch_5m_markets()
+    """Return current discovered markets from engine state."""
+    return market_engine.markets
 
 
 @app.get("/api/spot-prices")
 async def get_spot_prices():
-    """Fetch spot prices from CoinGecko (works globally; Binance may be geo-blocked)."""
-    out = {}
-    ids = ",".join(COINGECKO_IDS.values())
-    try:
-        async with httpx.AsyncClient(timeout=10) as client:
-            r = await client.get("https://api.coingecko.com/api/v3/simple/price", params={"ids": ids, "vs_currencies": "usd"})
-            r.raise_for_status()
-            data = r.json()
-        ts = int(time.time() * 1000)
-        for sym, cg_id in COINGECKO_IDS.items():
-            p = data.get(cg_id, {}).get("usd")
-            if p is not None:
-                out[sym] = {"value": float(p), "timestamp": ts}
-    except Exception:
-        pass
-    return out
+    """Return latest spot prices from engine state."""
+    return price_engine.prices
 
 
 @app.get("/api/clob/{condition_id}")

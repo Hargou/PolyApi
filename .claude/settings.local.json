@@ -1,0 +1,27 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(find /c/Users/karan/OneDrive/Documents/GitHub/polyapi -type f -name \"*.py\" -o -name \"*.html\" -o -name \"*.md\" -o -name \".env*\" -o -name \".gitignore\" 2>/dev/null | sort)",
+      "Bash(cd /c/Users/karan/OneDrive/Documents/GitHub/polyapi && test -f .gitignore && cat .gitignore || echo \"No .gitignore found\")",
+      "Bash(test -f \"C:/Users/karan/OneDrive/Documents/GitHub/polyapi/.gitignore\" && echo \"EXISTS\" || echo \"NOT FOUND\")",
+      "Bash(cd /c/Users/karan/OneDrive/Documents/GitHub/polyapi && mkdir -p engines tools tests)",
+      "Bash(cd /c/Users/karan/OneDrive/Documents/GitHub/polyapi && python -c \"import ast; [ast.parse\\(open\\(f\\).read\\(\\)\\) for f in ['app.py', 'engines/price_engine.py', 'engines/market_engine.py', 'engines/feed.py']]\" && echo \"All Python files parse OK\")",
+      "Bash(cd /c/Users/karan/OneDrive/Documents/GitHub/polyapi && python -c \"from engines.price_engine import PriceEngine; from engines.market_engine import MarketEngine; from engines.feed import Feed; print\\('All imports OK'\\)\")",
+      "Bash(cd /c/Users/karan/OneDrive/Documents/GitHub/polyapi && python -c \"import app; print\\('app.py imports OK'\\)\")",
+      "WebSearch",
+      "WebFetch(domain:data.chain.link)",
+      "WebFetch(domain:docs.polymarket.com)",
+      "WebFetch(domain:polymarket.com)",
+      "WebFetch(domain:blockeden.xyz)",
+      "WebFetch(domain:medium.com)",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:gist.github.com)",
+      "Bash(python3 -c \"\nimport time\n# The slug timestamp we saw: 1773124200\nslug_ts = 1773124200\nprint\\(f'Slug timestamp: {slug_ts}'\\)\nprint\\(f'Slug ts mod 300: {slug_ts % 300}'\\)\nfrom datetime import datetime, timezone\nprint\\(f'Slug ts as UTC: {datetime.fromtimestamp\\(slug_ts, tz=timezone.utc\\).isoformat\\(\\)}'\\)\nprint\\(f'Slug ts + 300:  {datetime.fromtimestamp\\(slug_ts + 300, tz=timezone.utc\\).isoformat\\(\\)}'\\)\nprint\\(\\)\nprint\\('From the API response:'\\)\nprint\\(f'  endDate:         2026-03-10T06:35:00Z'\\)\nprint\\(f'  startTime:       2026-03-10T06:30:00Z'\\)\nprint\\(f'  eventStartTime:  2026-03-10T06:30:00Z'\\)\nprint\\(f'  title:           Bitcoin Up or Down - March 10, 2:30AM-2:35AM ET'\\)\nprint\\(\\)\nprint\\('Analysis:'\\)\nprint\\(f'  slug_ts \\(1773124200\\) => 2026-03-10T06:30:00Z = window START'\\)\nprint\\(f'  slug_ts + 300        => 2026-03-10T06:35:00Z = window END = endDate'\\)\nprint\\(f'  eventStartTime       => 2026-03-10T06:30:00Z = window START'\\)\nprint\\(f'  Title says 2:30AM-2:35AM ET which is 6:30-6:35 UTC'\\)\nprint\\(\\)\n# Current time\nnow = int\\(time.time\\(\\)\\)\ncurrent_window = \\(now // 300\\) * 300\nprint\\(f'Current time: {now}'\\)\nprint\\(f'Current window start: {current_window} = {datetime.fromtimestamp\\(current_window, tz=timezone.utc\\).isoformat\\(\\)}'\\)\nprint\\(f'Current window end:   {current_window + 300} = {datetime.fromtimestamp\\(current_window + 300, tz=timezone.utc\\).isoformat\\(\\)}'\\)\n\")",
+      "WebFetch(domain:docs.chain.link)",
+      "Bash(python3 -c \"\nimport time\nnow = int\\(time.time\\(\\)\\)\nw = \\(now // 300\\) * 300\n# Check current, next, and previous windows\nfor label, ts in [\\('previous', w-300\\), \\('current', w\\), \\('next', w+300\\)]:\n    print\\(f'{label}: btc-updown-5m-{ts}'\\)\n\")",
+      "Bash(curl -s \"https://gamma-api.polymarket.com/events?slug=btc-updown-5m-1773124500\" 2>/dev/null | python3 -c \"\nimport json, sys\ndata = json.load\\(sys.stdin\\)\nif data:\n    ev = data[0]\n    print\\('Current window event:'\\)\n    print\\(f'  slug: {ev.get\\(\\\\\"slug\\\\\"\\)}'\\)\n    print\\(f'  title: {ev.get\\(\\\\\"title\\\\\"\\)}'\\)\n    print\\(f'  startTime: {ev.get\\(\\\\\"startTime\\\\\"\\)}'\\)\n    print\\(f'  endDate: {ev.get\\(\\\\\"endDate\\\\\"\\)}'\\)\n    print\\(f'  eventMetadata: {ev.get\\(\\\\\"eventMetadata\\\\\"\\)}'\\)\n    print\\(f'  active: {ev.get\\(\\\\\"active\\\\\"\\)}'\\)\n    print\\(f'  closed: {ev.get\\(\\\\\"closed\\\\\"\\)}'\\)\n    if ev.get\\('markets'\\):\n        m = ev['markets'][0]\n        print\\(f'  eventStartTime: {m.get\\(\\\\\"eventStartTime\\\\\"\\)}'\\)\n        print\\(f'  acceptingOrders: {m.get\\(\\\\\"acceptingOrders\\\\\"\\)}'\\)\nelse:\n    print\\('No data returned'\\)\n\" 2>/dev/null)",
+      "Bash(curl -s \"https://gamma-api.polymarket.com/events?slug=btc-updown-5m-1773123900\" 2>/dev/null | python3 -c \"\nimport json, sys\ndata = json.load\\(sys.stdin\\)\nif data:\n    ev = data[0]\n    print\\(f'slug: {ev.get\\(\\\\\"slug\\\\\"\\)}'\\)\n    print\\(f'title: {ev.get\\(\\\\\"title\\\\\"\\)}'\\)\n    print\\(f'closed: {ev.get\\(\\\\\"closed\\\\\"\\)}'\\)\n    print\\(f'eventMetadata: {ev.get\\(\\\\\"eventMetadata\\\\\"\\)}'\\)\nelse:\n    print\\('No data'\\)\n\" 2>/dev/null)",
+      "Bash(curl -s \"https://gamma-api.polymarket.com/events?slug=btc-updown-5m-1773125400\" 2>/dev/null | python3 -c \"\nimport json, sys\ndata = json.load\\(sys.stdin\\)\nif data:\n    ev = data[0]\n    print\\(f'Active window \\(1773125400\\):'\\)\n    print\\(f'  eventMetadata: {ev.get\\(\\\\\"eventMetadata\\\\\"\\)}'\\)\n    print\\(f'  closed: {ev.get\\(\\\\\"closed\\\\\"\\)}'\\)\n    print\\(f'  active: {ev.get\\(\\\\\"active\\\\\"\\)}'\\)\n    if ev.get\\('markets'\\):\n        m = ev['markets'][0]\n        print\\(f'  acceptingOrders: {m.get\\(\\\\\"acceptingOrders\\\\\"\\)}'\\)\n\" 2>/dev/null)"
+    ]
+  }
+}
