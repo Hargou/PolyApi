@@ -4,6 +4,53 @@ A design for testing multiple strategies with paper trading and backtesting on P
 
 ---
 
+## Strategy Math (Core Concepts)
+
+These principles should guide every strategy. Implement them in the Signal layer and OrderManager.
+
+### 1. Bayesian Update — Update Beliefs Before Entering
+
+\[
+P(H|D) = \frac{P(D|H) \cdot P(H)}{P(D)}
+\]
+
+- **H** = hypothesis (e.g. "BTC goes up this 5-min window")
+- **D** = data (spot move so far, order flow, recent trades)
+- Start with prior \(P(H)\) (e.g. 50% for symmetric), update with likelihood \(P(D|H)\) given the data. Only enter when your posterior \(P(H|D)\) is meaningfully different from the market.
+
+### 2. Edge Detection — Only Trade If You Have Edge
+
+\[
+EV = \hat{p} - p_{\text{market}}
+\]
+
+- \(\hat{p}\) = your estimated probability (from Bayesian update or model)
+- \(p_{\text{market}}\) = market-implied probability (mid of bid/ask)
+- **Only trade when EV > 0** (after spread and fees). If EV ≤ 0, hold.
+
+### 3. Kelly Sizing — Bet the Right Amount
+
+\[
+f^* = \frac{EV}{\hat{p}(1 - \hat{p})}
+\]
+
+- \(f^*\) = fraction of bankroll to bet
+- Use **fractional Kelly** (e.g. ¼ or ½) in practice to reduce variance
+- Ensures you don't overbet on small edges or underbet on large ones
+
+### 4. LMSR / AMM Pricing (Context)
+
+\[
+p(q) = \frac{e^{q/b}}{\sum_j e^{q_j/b}}
+\]
+
+- Polymarket's **5-min crypto markets use CLOB** (order book), not LMSR AMM
+- LMSR is how many prediction market AMMs price; it's the softmax from neural networks
+- **Use for:** understanding liquidity impact in AMM-style markets, or if Polymarket adds AMM markets. For CLOB, use L2 order book walking instead
+- Cost function: \(C(q) = b \log(\sum \exp(q_i/b))\); \(b\) = liquidity parameter
+
+---
+
 ## Core Principle: Unified Execution Pipeline
 
 **Live trading and historical replay must share the same execution path.** No environment flags, no conditional branches—the same StrategyRunner, OrderManager, and Portfolio logic processes every event in both modes. Swapping the data source is the only difference.
@@ -100,9 +147,12 @@ class MarketState:
 @dataclass
 class Signal:
     action: Literal["buy_yes", "buy_no", "hold"]
-    size: int  # contracts
+    size: int  # contracts (or use Kelly fraction; OrderManager converts to size)
     max_slippage_bps: int
     rationale: str
+    # Optional: for edge-aware strategies
+    p_hat: Optional[float] = None   # your estimated P(Yes)
+    ev_bps: Optional[float] = None  # edge in bps: (p_hat - p_market) * 10000
 
 class BaseStrategy(ABC):
     """All strategies implement this interface."""
@@ -210,24 +260,71 @@ For each signal: find nearest book snapshot, walk levels, compute slippage vs re
 
 ---
 
-## Example Strategy: Spot vs Market Mispricing
+## Strategy Helpers (Kelly, Edge)
 
-For 5-min "BTC Up" markets: if spot is up 0.5% in the window but market probability is only 45%, there may be edge buying Yes.
+```python
+# execution/sizing.py
+def kelly_fraction(p_hat: float, p_market: float, fraction: float = 0.25) -> float:
+    """Fractional Kelly. p_hat = your prob, p_market = market price. Returns f* in [0, 1]."""
+    ev = p_hat - p_market
+    if ev <= 0 or p_hat <= 0 or p_hat >= 1:
+        return 0.0
+    f_star = ev / (p_hat * (1 - p_hat))
+    return max(0.0, min(1.0, f_star * fraction))
+
+def contracts_from_kelly(f: float, bankroll: float, price: float) -> int:
+    """Convert Kelly fraction to contract count."""
+    if f <= 0 or price <= 0:
+        return 0
+    return int((bankroll * f) / price)
+```
+
+---
+
+## Example Strategy: Spot vs Market (Bayesian + Edge + Kelly)
+
+For 5-min "BTC Up" markets: use spot move as data D, update prior, compute edge, size with Kelly.
 
 ```python
 # strategies/spot_momentum.py
 class SpotMomentumStrategy(BaseStrategy):
-    def __init__(self, min_edge_bps: int = 50, max_spread_bps: int = 100):
+    def __init__(self, min_edge_bps: int = 50, max_spread_bps: int = 100, kelly_frac: float = 0.25):
         self.min_edge_bps = min_edge_bps
         self.max_spread_bps = max_spread_bps
+        self.kelly_frac = kelly_frac
 
     def evaluate(self, state: MarketState) -> Signal:
         if state.spread_bps > self.max_spread_bps:
             return Signal("hold", 0, 0, "spread too wide")
-        # Compare spot move vs market probability
-        # ... (need window-start spot from state)
-        return Signal("buy_yes", 100, 50, "spot up, market underpricing")
+        p_market = (state.best_bid + state.best_ask) / 2
+        # Bayesian: P(Up | spot_move) from spot return in window
+        p_hat = self._posterior(state)  # e.g. logistic(spot_return) or simple heuristic
+        ev_bps = (p_hat - p_market) * 10_000
+        if ev_bps < self.min_edge_bps:
+            return Signal("hold", 0, 0, f"no edge: ev={ev_bps:.0f} bps")
+        bankroll = getattr(state, "bankroll", 10_000)  # from Portfolio or config
+        size = contracts_from_kelly(kelly_fraction(p_hat, p_market, self.kelly_frac), bankroll, p_market)
+        return Signal("buy_yes", size, 50, f"edge={ev_bps:.0f} bps", p_hat=p_hat, ev_bps=ev_bps)
 ```
+
+---
+
+## App UI for Paper / Backtest
+
+**Current state:** The dashboard (`index.html`) shows live spot prices and market cards. There is **no visual for paper trading or backtesting** yet.
+
+**Planned additions:**
+
+| Component | Location | Purpose |
+|-----------|----------|---------|
+| **Paper/Backtest nav** | Header or sidebar | Link to Strategy Lab view |
+| **Strategy Lab page** | `/paper` or `/strategy-lab` | Shows active paper run status, selected strategy, live PnL |
+| **Backtest results panel** | Same page or modal | Table of recent runs: run_id, strategy, net_pnl, trade_count, Sharpe |
+| **Run detail** | Expandable row or `/runs/{id}` | Per-trade log, fill prices, slippage |
+
+**Data flow:** CLI runs (`run_paper`, `run_backtest`) write to `data_store/runs/`. The app can expose `/api/paper-status` and `/api/backtest-runs` to fetch current state. Paper runs could also push updates via WebSocket for live PnL.
+
+**Minimal first step:** Add a "Strategy Lab" link in the header that routes to a placeholder page. Implement the API + UI as Phase 4/5.
 
 ---
 
@@ -251,6 +348,17 @@ Every backtest/paper run should log:
   "blocked_trade_count": 0
 }
 ```
+
+---
+
+## Feedback Incorporated
+
+From `ARCHITECTURE_FEEDBACK.md`:
+
+- **RiskEngine** — Add between StrategyRunner and OrderManager (position limits, drawdown circuit breakers). Deferred to Phase 2.
+- **State serialization** — `BaseStrategy` should support `save_state`/`load_state` for reproducibility.
+- **Benchmark strategies** — Add buy-and-hold, always-yes, random entry for comparison.
+- **LMSR note** — Polymarket 5-min markets use CLOB; LMSR is for AMM context. Documented above.
 
 ---
 

@@ -90,6 +90,13 @@ async def index():
         return HTMLResponse(content=f.read(), headers={"Cache-Control": "no-cache, no-store, must-revalidate"})
 
 
+@app.get("/paper", response_class=HTMLResponse)
+async def paper():
+    """Strategy Lab — paper trading & backtesting placeholder."""
+    with open("static/paper.html") as f:
+        return HTMLResponse(content=f.read(), headers={"Cache-Control": "no-cache, no-store, must-revalidate"})
+
+
 @app.websocket("/ws/feed")
 async def ws_feed(ws: WebSocket):
     """Single browser WebSocket — receives unified stream from all engines."""

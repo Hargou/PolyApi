@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Strategy Lab — PolyApi</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+  <style>
+    :root { --bg:#0a0a0f; --card:#111118; --up:#00ff88; --down:#ff3355; --neutral:#7c6ef4; --text:#e8e8f0; --text-dim:#666680; }
+    body { background: var(--bg); color: var(--text); font-family: 'Inter', sans-serif; }
+    .font-mono { font-family: 'JetBrains Mono', monospace; }
+  </style>
+</head>
+<body class="min-h-screen">
+  <header class="sticky top-0 z-50 border-b border-white/10 bg-[#0a0a0f]/95 backdrop-blur-md">
+    <div class="max-w-7xl mx-auto px-4 py-3 flex items-center justify-between">
+      <div class="flex items-center gap-6">
+        <a href="/" class="text-[var(--text-dim)] hover:text-[var(--text)] text-sm">← Terminal</a>
+        <h1 class="text-lg font-bold">Strategy Lab</h1>
+      </div>
+    </div>
+  </header>
+
+  <main class="max-w-7xl mx-auto px-4 py-12">
+    <div class="rounded-xl border border-white/10 bg-[#111118] p-8 max-w-2xl">
+      <h2 class="text-xl font-bold mb-2">Paper Trading & Backtesting</h2>
+      <p class="text-[var(--text-dim)] mb-6">
+        Run strategies against live data (paper) or historical replay (backtest). Same execution pipeline for both.
+      </p>
+      <div class="space-y-4 text-sm">
+        <div class="flex items-start gap-3">
+          <span class="text-[#7c6ef4] font-mono">CLI</span>
+          <code class="text-[var(--text-dim)] font-mono bg-black/30 px-2 py-1 rounded">python -m cli.run_paper --strategy spot_momentum</code>
+        </div>
+        <div class="flex items-start gap-3">
+          <span class="text-[#7c6ef4] font-mono">CLI</span>
+          <code class="text-[var(--text-dim)] font-mono bg-black/30 px-2 py-1 rounded">python -m cli.run_backtest --strategy spot_momentum --data data_store/events/</code>
+        </div>
+      </div>
+      <p class="text-[var(--text-dim)] text-xs mt-6">
+        Strategy Lab UI (live PnL, run history) coming in Phase 4–5. See <a href="#" class="text-[#7c6ef4] hover:underline">docs/BACKTEST_PAPER_ARCHITECTURE.md</a>.
+      </p>
+    </div>
+
+    <div class="mt-8 rounded-xl border border-white/10 bg-[#111118] p-6 max-w-2xl">
+      <h3 class="font-bold mb-3">Strategy Math</h3>
+      <ul class="text-sm text-[var(--text-dim)] space-y-2 font-mono">
+        <li>Bayesian: P(H|D) = P(D|H)·P(H) / P(D)</li>
+        <li>Edge: EV = p̂ − p_market</li>
+        <li>Kelly: f* = EV / (p̂(1−p̂))</li>
+        <li>LMSR: p(q) = e^{q/b} / Σe^{qⱼ/b}</li>
+      </ul>
+    </div>
+  </main>
+</body>
+</html>

@@ -130,6 +130,7 @@
         h('div', { className: 'max-w-7xl mx-auto px-4 py-3 flex items-center justify-between' },
           h('div', { className: 'flex items-center gap-4' },
             h('h1', { className: 'text-lg font-bold tracking-tight' }, 'Polymarket ', h('span', { className: 'text-[#7c6ef4]' }, '5-Min Crypto'), ' Terminal'),
+            h('a', { href: '/paper', className: 'text-xs text-[var(--text-dim)] hover:text-[#7c6ef4] transition' }, 'Strategy Lab'),
             props.feedPaused
               ? h('span', { className: 'flex items-center gap-1.5 px-2 py-0.5 rounded-full bg-gray-500/20 text-gray-400 text-[10px] font-bold' },
                   h('span', { className: 'w-1.5 h-1.5 rounded-full bg-gray-500' }), ' PAUSED')
