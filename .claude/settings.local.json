@@ -26,7 +26,19 @@
       "WebFetch(domain:rocknblock.io)",
       "WebFetch(domain:flypix.ai)",
       "Bash(cd \"C:/Users/karan/OneDrive/Desktop/PolyApi\" && rm tests/test_compare.py tests/test_crypto_compare.py tests/test_crypto_flow.py tests/test_clob.py tests/test_submatch.py tests/test_ws.py)",
-      "Bash(python -m pytest tests/test_fees.py tests/test_fill_simulator.py tests/test_portfolio.py tests/test_risk_engine.py -v 2>&1)"
+      "Bash(python -m pytest tests/test_fees.py tests/test_fill_simulator.py tests/test_portfolio.py tests/test_risk_engine.py -v 2>&1)",
+      "Bash(python -c \"import app; print\\('app.py OK, routes:', [r.path for r in app.app.routes if hasattr\\(r, 'path'\\)]\\)\" 2>&1)",
+      "Bash(python -m pytest tests/test_fees.py tests/test_fill_simulator.py tests/test_portfolio.py tests/test_risk_engine.py -q 2>&1)",
+      "Bash(python -m cli.backtest --all --markets 10 2>&1)",
+      "Bash(python -m cli.sweep --strategy spot_momentum --param min_edge_bps --values 100,200,300,500,800 --markets 10 2>&1 | tail -30)",
+      "Bash(python -m cli.sweep --strategy spot_momentum --markets 10 2>&1 | tail -30)",
+      "Bash(python -c \"import py_compile; py_compile.compile\\('research/strategy_proposals.py', doraise=True\\)\" 2>&1)",
+      "Bash(python -c \"\nimport sys\nsys.path.insert\\(0, '.'\\)\nfrom research.strategy_proposals import \\(\n    FeeOptimizedExtremesStrategy,\n    TimeDecayBiasStrategy,\n    SpotPredictionDivergenceStrategy,\n    ContrarianExtremeFadeStrategy,\n    VolatilityRegimeStrategy,\n    OrderBookImbalanceStrategy,\n\\)\nprint\\('All 6 strategy classes imported successfully'\\)\nfor cls in [FeeOptimizedExtremesStrategy, TimeDecayBiasStrategy,\n            SpotPredictionDivergenceStrategy, ContrarianExtremeFadeStrategy,\n            VolatilityRegimeStrategy, OrderBookImbalanceStrategy]:\n    s = cls\\(\\)\n    print\\(f'  {s.name}: {cls.__name__}'\\)\n\" 2>&1)",
+      "Bash(python -c \"from strategies.quant_models import QuantModelsStrategy; from strategies.fee_extremes import FeeExtremesStrategy; from strategies.time_decay import TimeDecayStrategy; print\\('All new strategies import OK'\\)\" 2>&1)",
+      "Bash(python -c \"from collector.recorder import DataRecorder; r = DataRecorder\\(\\); print\\('Recorder OK'\\)\" 2>&1)",
+      "Bash(python -c \"from collector.replay import load_events, STRATEGIES; print\\('Replay OK, strategies:', list\\(STRATEGIES.keys\\(\\)\\)\\)\" 2>&1)",
+      "Bash(wc -l data_store/2026-03-14.jsonl && echo \"---\" && head -5 data_store/2026-03-14.jsonl | python -m json.tool --no-ensure-ascii 2>/dev/null || head -3 data_store/2026-03-14.jsonl)",
+      "WebFetch(domain:api.coinbase.com)"
     ]
   }
 }

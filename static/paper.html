@@ -3,56 +3,472 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Strategy Lab — PolyApi</title>
+  <title>Paper Trading — PolyApi</title>
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
   <script src="https://cdn.tailwindcss.com"></script>
   <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
   <style>
-    :root { --bg:#0a0a0f; --card:#111118; --up:#00ff88; --down:#ff3355; --neutral:#7c6ef4; --text:#e8e8f0; --text-dim:#666680; }
+    :root { --bg:#0a0a0f; --card:#111118; --up:#00ff88; --down:#ff3355; --neutral:#7c6ef4; --text:#e8e8f0; --text-dim:#666680; --border:rgba(255,255,255,0.08); }
     body { background: var(--bg); color: var(--text); font-family: 'Inter', sans-serif; }
     .font-mono { font-family: 'JetBrains Mono', monospace; }
+    .live-pulse { animation: livePulse 1.5s ease-in-out infinite; }
+    @keyframes livePulse { 0%,100%{opacity:1} 50%{opacity:0.5} }
+    .flash-trade { animation: flashIn 0.6s ease-out; }
+    @keyframes flashIn { 0%{background:rgba(124,110,244,0.3);transform:translateX(-4px)} 100%{background:transparent;transform:translateX(0)} }
+    .scrollbar-thin::-webkit-scrollbar { width: 4px; }
+    .scrollbar-thin::-webkit-scrollbar-track { background: transparent; }
+    .scrollbar-thin::-webkit-scrollbar-thumb { background: rgba(124,110,244,0.3); border-radius: 2px; }
   </style>
 </head>
-<body class="min-h-screen">
-  <header class="sticky top-0 z-50 border-b border-white/10 bg-[#0a0a0f]/95 backdrop-blur-md">
-    <div class="max-w-7xl mx-auto px-4 py-3 flex items-center justify-between">
-      <div class="flex items-center gap-6">
-        <a href="/" class="text-[var(--text-dim)] hover:text-[var(--text)] text-sm">← Terminal</a>
-        <h1 class="text-lg font-bold">Strategy Lab</h1>
-      </div>
-    </div>
-  </header>
+<body class="min-h-screen overflow-x-hidden">
+  <div id="root">
+    <div style="display:flex;align-items:center;justify-content:center;min-height:100vh;color:#e8e8f0">Loading...</div>
+  </div>
 
-  <main class="max-w-7xl mx-auto px-4 py-12">
-    <div class="rounded-xl border border-white/10 bg-[#111118] p-8 max-w-2xl">
-      <h2 class="text-xl font-bold mb-2">Paper Trading & Backtesting</h2>
-      <p class="text-[var(--text-dim)] mb-6">
-        Run strategies against live data (paper) or historical replay (backtest). Same execution pipeline for both.
-      </p>
-      <div class="space-y-4 text-sm">
-        <div class="flex items-start gap-3">
-          <span class="text-[#7c6ef4] font-mono">CLI</span>
-          <code class="text-[var(--text-dim)] font-mono bg-black/30 px-2 py-1 rounded">python -m cli.run_paper --strategy spot_momentum</code>
-        </div>
-        <div class="flex items-start gap-3">
-          <span class="text-[#7c6ef4] font-mono">CLI</span>
-          <code class="text-[var(--text-dim)] font-mono bg-black/30 px-2 py-1 rounded">python -m cli.run_backtest --strategy spot_momentum --data data_store/events/</code>
-        </div>
-      </div>
-      <p class="text-[var(--text-dim)] text-xs mt-6">
-        Strategy Lab UI (live PnL, run history) coming in Phase 4–5. See <a href="#" class="text-[#7c6ef4] hover:underline">docs/BACKTEST_PAPER_ARCHITECTURE.md</a>.
-      </p>
-    </div>
+  <script>
+    var h = React.createElement;
+    var useState = React.useState;
+    var useEffect = React.useEffect;
+    var useRef = React.useRef;
+    var useCallback = React.useCallback;
 
-    <div class="mt-8 rounded-xl border border-white/10 bg-[#111118] p-6 max-w-2xl">
-      <h3 class="font-bold mb-3">Strategy Math</h3>
-      <ul class="text-sm text-[var(--text-dim)] space-y-2 font-mono">
-        <li>Bayesian: P(H|D) = P(D|H)·P(H) / P(D)</li>
-        <li>Edge: EV = p̂ − p_market</li>
-        <li>Kelly: f* = EV / (p̂(1−p̂))</li>
-        <li>LMSR: p(q) = e^{q/b} / Σe^{qⱼ/b}</li>
-      </ul>
-    </div>
-  </main>
+    // ---- Paper WS hook ----
+    function usePaperFeed() {
+      var ref = useRef(null);
+      var backoff = useRef(1000);
+      var stateRef = useRef({
+        wsStatus: 'disconnected',
+        sessionStatus: 'idle',
+        strategy: '',
+        elapsed: 0,
+        eventCount: 0,
+        bankroll: 0,
+        initialBankroll: 0,
+        netPnl: 0,
+        totalFees: 0,
+        positions: [],
+        trades: [],
+        settlements: [],
+        metrics: {},
+        summary: {},
+      });
+      var listenersRef = useRef(new Set());
+      var version = useRef(0);
+
+      function notify() { version.current++; listenersRef.current.forEach(function(fn) { fn(version.current); }); }
+
+      function subscribe(fn) {
+        listenersRef.current.add(fn);
+        return function() { listenersRef.current.delete(fn); };
+      }
+
+      function getState() { return stateRef.current; }
+
+      useEffect(function() {
+        var mounted = true;
+        function connect() {
+          if (!mounted) return;
+          var proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+          var ws = new WebSocket(proto + '//' + location.host + '/ws/paper');
+          ref.current = ws;
+          stateRef.current = Object.assign({}, stateRef.current, { wsStatus: 'connecting' });
+          notify();
+
+          ws.onopen = function() {
+            if (!mounted) { ws.close(); return; }
+            backoff.current = 1000;
+            stateRef.current = Object.assign({}, stateRef.current, { wsStatus: 'connected' });
+            notify();
+          };
+
+          ws.onmessage = function(e) {
+            try {
+              var msg = JSON.parse(e.data);
+              var s = stateRef.current;
+
+              if (msg.type === 'snapshot') {
+                stateRef.current = Object.assign({}, s, {
+                  sessionStatus: msg.status || 'idle',
+                  strategy: msg.strategy || '',
+                  elapsed: msg.elapsed_sec || 0,
+                  eventCount: msg.event_count || 0,
+                  bankroll: msg.bankroll || 0,
+                  initialBankroll: msg.initial_bankroll || 0,
+                  netPnl: msg.net_pnl || 0,
+                  totalFees: msg.total_fees || 0,
+                  positions: msg.positions || [],
+                  trades: msg.trades || [],
+                  settlements: msg.settlements || [],
+                  metrics: msg.metrics || {},
+                  summary: msg.summary || {},
+                });
+              } else if (msg.type === 'update') {
+                var newTrades = s.trades.slice();
+                if (msg.new_trade) newTrades.push(msg.new_trade);
+                var newSettlements = s.settlements.slice();
+                if (msg.new_settlement) newSettlements.push(msg.new_settlement);
+                stateRef.current = Object.assign({}, s, {
+                  elapsed: msg.elapsed_sec || s.elapsed,
+                  eventCount: msg.event_count || s.eventCount,
+                  bankroll: msg.bankroll || s.bankroll,
+                  netPnl: msg.net_pnl != null ? msg.net_pnl : s.netPnl,
+                  totalFees: msg.total_fees != null ? msg.total_fees : s.totalFees,
+                  positions: msg.positions || s.positions,
+                  trades: newTrades.slice(-100),
+                  settlements: newSettlements.slice(-100),
+                  metrics: msg.metrics || s.metrics,
+                  summary: msg.summary || s.summary,
+                });
+              } else if (msg.type === 'status') {
+                stateRef.current = Object.assign({}, s, {
+                  sessionStatus: msg.status,
+                  strategy: msg.strategy || s.strategy,
+                  bankroll: msg.bankroll || s.bankroll,
+                  initialBankroll: msg.bankroll || s.initialBankroll,
+                });
+              } else if (msg.type === 'stopped') {
+                stateRef.current = Object.assign({}, s, {
+                  sessionStatus: 'stopped',
+                  bankroll: msg.bankroll || s.bankroll,
+                  netPnl: msg.net_pnl != null ? msg.net_pnl : s.netPnl,
+                  metrics: msg.metrics || s.metrics,
+                  summary: msg.summary || s.summary,
+                });
+              }
+              notify();
+            } catch(ex) { console.error('parse error', ex); }
+          };
+
+          ws.onclose = function() {
+            if (!mounted) return;
+            stateRef.current = Object.assign({}, stateRef.current, { wsStatus: 'disconnected' });
+            notify();
+            var delay = Math.min(backoff.current, 15000);
+            backoff.current = delay * 1.5;
+            setTimeout(connect, delay);
+          };
+        }
+        connect();
+        return function() { mounted = false; if (ref.current) ref.current.close(); };
+      }, []);
+
+      return { subscribe: subscribe, getState: getState };
+    }
+
+    function useStore(store) {
+      var s = useState(0);
+      useEffect(function() { return store.subscribe(function() { s[1](function(v) { return v + 1; }); }); }, [store]);
+      return store.getState();
+    }
+
+    // ---- API calls ----
+    function apiPost(path, params) {
+      var url = path;
+      if (params) {
+        var qs = Object.keys(params).map(function(k) { return k + '=' + encodeURIComponent(params[k]); }).join('&');
+        url += '?' + qs;
+      }
+      return fetch(url, { method: 'POST' }).then(function(r) { return r.json(); });
+    }
+
+    // ---- Components ----
+
+    function StatusDot(props) {
+      var colors = { connected: 'var(--up)', connecting: '#ffaa00', disconnected: 'var(--down)' };
+      return h('span', {
+        style: { display: 'inline-block', width: 8, height: 8, borderRadius: '50%',
+                 background: colors[props.status] || 'var(--text-dim)', marginRight: 6 },
+        className: props.status === 'connected' ? '' : 'live-pulse',
+      });
+    }
+
+    function Header(props) {
+      var state = props.state;
+      return h('header', { className: 'sticky top-0 z-50 border-b bg-[#0a0a0f]/95 backdrop-blur-md', style: { borderColor: 'var(--border)' } },
+        h('div', { className: 'max-w-7xl mx-auto px-4 py-3 flex items-center justify-between' },
+          h('div', { className: 'flex items-center gap-4' },
+            h('a', { href: '/', className: 'text-sm hover:text-white', style: { color: 'var(--text-dim)' } }, '\u2190 Terminal'),
+            h('h1', { className: 'text-lg font-bold' }, 'Paper Trading'),
+            h(StatusDot, { status: state.wsStatus }),
+            h('span', { className: 'text-xs font-mono', style: { color: 'var(--text-dim)' } }, state.wsStatus)
+          ),
+          h('div', { className: 'flex items-center gap-3' },
+            state.sessionStatus === 'running'
+              ? h('span', { className: 'text-xs font-mono px-2 py-1 rounded', style: { background: 'rgba(0,255,136,0.15)', color: 'var(--up)' } }, 'LIVE')
+              : state.sessionStatus === 'stopped'
+                ? h('span', { className: 'text-xs font-mono px-2 py-1 rounded', style: { background: 'rgba(255,51,85,0.15)', color: 'var(--down)' } }, 'STOPPED')
+                : h('span', { className: 'text-xs font-mono px-2 py-1 rounded', style: { background: 'rgba(124,110,244,0.15)', color: 'var(--neutral)' } }, 'IDLE')
+          )
+        )
+      );
+    }
+
+    function Controls(props) {
+      var state = props.state;
+      var strategyRef = useRef(null);
+      var bankrollRef = useRef(null);
+      var running = state.sessionStatus === 'running';
+
+      function startSession() {
+        var strat = strategyRef.current ? strategyRef.current.value : 'spot_momentum';
+        var bank = bankrollRef.current ? parseFloat(bankrollRef.current.value) || 10000 : 10000;
+        apiPost('/api/paper/start', { strategy: strat, bankroll: bank });
+      }
+
+      function stopSession() { apiPost('/api/paper/stop'); }
+
+      var selectStyle = { background: '#0a0a0f', color: 'var(--text)', border: '1px solid rgba(255,255,255,0.12)',
+                          borderRadius: 6, padding: '6px 10px', fontSize: 13, fontFamily: "'JetBrains Mono', monospace" };
+      var inputStyle = Object.assign({}, selectStyle, { width: 110 });
+
+      return h('div', { className: 'flex items-center gap-3 flex-wrap' },
+        h('select', { ref: strategyRef, style: selectStyle, disabled: running },
+          h('option', { value: 'spot_momentum' }, 'spot_momentum'),
+          h('option', { value: 'always_yes' }, 'always_yes'),
+          h('option', { value: 'always_no' }, 'always_no'),
+          h('option', { value: 'random' }, 'random')
+        ),
+        h('input', { ref: bankrollRef, type: 'number', defaultValue: '10000', placeholder: 'Bankroll',
+                     style: inputStyle, disabled: running }),
+        running
+          ? h('button', { onClick: stopSession, className: 'px-4 py-1.5 rounded text-sm font-medium',
+              style: { background: 'rgba(255,51,85,0.2)', color: 'var(--down)', border: '1px solid rgba(255,51,85,0.3)' } }, 'Stop')
+          : h('button', { onClick: startSession, className: 'px-4 py-1.5 rounded text-sm font-medium',
+              style: { background: 'rgba(0,255,136,0.15)', color: 'var(--up)', border: '1px solid rgba(0,255,136,0.3)' } }, 'Start')
+      );
+    }
+
+    function MetricCard(props) {
+      var isNeg = typeof props.value === 'number' && props.value < 0;
+      var valColor = props.colored ? (isNeg ? 'var(--down)' : 'var(--up)') : 'var(--text)';
+      var formatted = props.prefix ? props.prefix + (typeof props.value === 'number' ? Math.abs(props.value).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : props.value) : String(props.value);
+      if (props.colored && isNeg) formatted = '-' + formatted;
+
+      return h('div', { className: 'rounded-lg p-3', style: { background: 'var(--card)', border: '1px solid var(--border)' } },
+        h('div', { className: 'text-xs mb-1', style: { color: 'var(--text-dim)' } }, props.label),
+        h('div', { className: 'text-lg font-bold font-mono', style: { color: valColor } }, formatted),
+        props.sub ? h('div', { className: 'text-xs mt-0.5 font-mono', style: { color: 'var(--text-dim)' } }, props.sub) : null
+      );
+    }
+
+    function Dashboard(props) {
+      var s = props.state;
+      var pnl = s.netPnl || 0;
+      var fees = s.totalFees || 0;
+      var elapsed = s.elapsed || 0;
+      var mins = Math.floor(elapsed / 60);
+      var secs = Math.floor(elapsed % 60);
+      var timeStr = mins + 'm ' + secs + 's';
+      var sm = s.summary || {};
+
+      return h('div', { className: 'grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 gap-3' },
+        h(MetricCard, { label: 'Net PnL', value: pnl, prefix: '$', colored: true }),
+        h(MetricCard, { label: 'Bankroll', value: s.bankroll || 0, prefix: '$' }),
+        h(MetricCard, { label: 'Fees Paid', value: fees, prefix: '$' }),
+        h(MetricCard, { label: 'Win Rate', value: sm.win_rate != null ? sm.win_rate + '%' : '--' }),
+        h(MetricCard, { label: 'Open / Settled', value: (sm.open_positions || 0) + ' / ' + (sm.settled_count || 0) }),
+        h(MetricCard, { label: 'Elapsed', value: timeStr, sub: s.eventCount + ' events' })
+      );
+    }
+
+    function Positions(props) {
+      var positions = props.positions || [];
+      if (positions.length === 0) {
+        return h('div', { className: 'rounded-lg p-4 text-center text-sm', style: { background: 'var(--card)', border: '1px solid var(--border)', color: 'var(--text-dim)' } },
+          'No open positions');
+      }
+      return h('div', { className: 'rounded-lg overflow-hidden', style: { background: 'var(--card)', border: '1px solid var(--border)' } },
+        h('table', { className: 'w-full text-sm font-mono' },
+          h('thead', null,
+            h('tr', { style: { borderBottom: '1px solid var(--border)' } },
+              h('th', { className: 'text-left px-3 py-2 text-xs', style: { color: 'var(--text-dim)' } }, 'Asset'),
+              h('th', { className: 'text-left px-3 py-2 text-xs', style: { color: 'var(--text-dim)' } }, 'Side'),
+              h('th', { className: 'text-right px-3 py-2 text-xs', style: { color: 'var(--text-dim)' } }, 'Size'),
+              h('th', { className: 'text-right px-3 py-2 text-xs', style: { color: 'var(--text-dim)' } }, 'Entry'),
+              h('th', { className: 'text-right px-3 py-2 text-xs', style: { color: 'var(--text-dim)' } }, 'Expires')
+            )
+          ),
+          h('tbody', null,
+            positions.map(function(p, i) {
+              var now = Date.now() / 1000;
+              var rem = Math.max(0, p.window_end_ts - now);
+              var remStr = Math.floor(rem / 60) + ':' + String(Math.floor(rem % 60)).padStart(2, '0');
+              var sideColor = p.side === 'yes' ? 'var(--up)' : 'var(--down)';
+              return h('tr', { key: i, style: { borderBottom: '1px solid var(--border)' } },
+                h('td', { className: 'px-3 py-2 font-medium' }, p.asset),
+                h('td', { className: 'px-3 py-2', style: { color: sideColor } }, p.side.toUpperCase()),
+                h('td', { className: 'px-3 py-2 text-right' }, p.size),
+                h('td', { className: 'px-3 py-2 text-right' }, '$' + p.entry_price.toFixed(4)),
+                h('td', { className: 'px-3 py-2 text-right', style: { color: rem < 30 ? 'var(--down)' : 'var(--text-dim)' } }, remStr)
+              );
+            })
+          )
+        )
+      );
+    }
+
+    function TradeLog(props) {
+      var trades = (props.trades || []).slice().reverse();
+      if (trades.length === 0) {
+        return h('div', { className: 'rounded-lg p-4 text-center text-sm', style: { background: 'var(--card)', border: '1px solid var(--border)', color: 'var(--text-dim)' } },
+          'No trades yet');
+      }
+      return h('div', { className: 'rounded-lg overflow-hidden', style: { background: 'var(--card)', border: '1px solid var(--border)', maxHeight: 280, overflowY: 'auto' } },
+        h('table', { className: 'w-full text-xs font-mono' },
+          h('thead', { className: 'sticky top-0', style: { background: 'var(--card)' } },
+            h('tr', { style: { borderBottom: '1px solid var(--border)' } },
+              h('th', { className: 'text-left px-2 py-1.5', style: { color: 'var(--text-dim)' } }, 'Side'),
+              h('th', { className: 'text-left px-2 py-1.5', style: { color: 'var(--text-dim)' } }, 'Asset'),
+              h('th', { className: 'text-right px-2 py-1.5', style: { color: 'var(--text-dim)' } }, 'Size'),
+              h('th', { className: 'text-right px-2 py-1.5', style: { color: 'var(--text-dim)' } }, 'Price'),
+              h('th', { className: 'text-right px-2 py-1.5', style: { color: 'var(--text-dim)' } }, 'Slip'),
+              h('th', { className: 'text-right px-2 py-1.5', style: { color: 'var(--text-dim)' } }, 'Fee'),
+              h('th', { className: 'text-left px-2 py-1.5', style: { color: 'var(--text-dim)' } }, 'Reason')
+            )
+          ),
+          h('tbody', null,
+            trades.map(function(t, i) {
+              var isBuy = t.side.indexOf('buy') === 0;
+              return h('tr', { key: i, className: i === 0 ? 'flash-trade' : '', style: { borderBottom: '1px solid var(--border)' } },
+                h('td', { className: 'px-2 py-1.5', style: { color: isBuy ? 'var(--up)' : 'var(--down)' } }, t.side),
+                h('td', { className: 'px-2 py-1.5' }, t.asset),
+                h('td', { className: 'px-2 py-1.5 text-right' }, t.size),
+                h('td', { className: 'px-2 py-1.5 text-right' }, '$' + t.fill_price.toFixed(4)),
+                h('td', { className: 'px-2 py-1.5 text-right', style: { color: 'var(--text-dim)' } }, t.slippage_bps.toFixed(0) + 'bp'),
+                h('td', { className: 'px-2 py-1.5 text-right', style: { color: 'var(--text-dim)' } }, '$' + t.fee.toFixed(4)),
+                h('td', { className: 'px-2 py-1.5', style: { color: 'var(--text-dim)', maxWidth: 160, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, t.rationale)
+              );
+            })
+          )
+        )
+      );
+    }
+
+    function Settlements(props) {
+      var settlements = (props.settlements || []).slice().reverse();
+      if (settlements.length === 0) {
+        return h('div', { className: 'rounded-lg p-4 text-center text-sm', style: { background: 'var(--card)', border: '1px solid var(--border)', color: 'var(--text-dim)' } },
+          'No settlements yet');
+      }
+      return h('div', { className: 'rounded-lg overflow-hidden', style: { background: 'var(--card)', border: '1px solid var(--border)', maxHeight: 220, overflowY: 'auto' } },
+        h('table', { className: 'w-full text-xs font-mono' },
+          h('thead', { className: 'sticky top-0', style: { background: 'var(--card)' } },
+            h('tr', { style: { borderBottom: '1px solid var(--border)' } },
+              h('th', { className: 'text-left px-2 py-1.5', style: { color: 'var(--text-dim)' } }, 'Result'),
+              h('th', { className: 'text-left px-2 py-1.5', style: { color: 'var(--text-dim)' } }, 'Asset'),
+              h('th', { className: 'text-left px-2 py-1.5', style: { color: 'var(--text-dim)' } }, 'Side'),
+              h('th', { className: 'text-right px-2 py-1.5', style: { color: 'var(--text-dim)' } }, 'Size'),
+              h('th', { className: 'text-right px-2 py-1.5', style: { color: 'var(--text-dim)' } }, 'Entry'),
+              h('th', { className: 'text-left px-2 py-1.5', style: { color: 'var(--text-dim)' } }, 'Outcome'),
+              h('th', { className: 'text-right px-2 py-1.5', style: { color: 'var(--text-dim)' } }, 'PnL')
+            )
+          ),
+          h('tbody', null,
+            settlements.map(function(s, i) {
+              var won = s.pnl > 0;
+              return h('tr', { key: i, className: i === 0 ? 'flash-trade' : '', style: { borderBottom: '1px solid var(--border)' } },
+                h('td', { className: 'px-2 py-1.5 font-bold', style: { color: won ? 'var(--up)' : 'var(--down)' } }, won ? 'WIN' : 'LOSS'),
+                h('td', { className: 'px-2 py-1.5' }, s.asset),
+                h('td', { className: 'px-2 py-1.5' }, s.side.toUpperCase()),
+                h('td', { className: 'px-2 py-1.5 text-right' }, s.size),
+                h('td', { className: 'px-2 py-1.5 text-right' }, '$' + s.entry_price.toFixed(4)),
+                h('td', { className: 'px-2 py-1.5' }, s.outcome.toUpperCase()),
+                h('td', { className: 'px-2 py-1.5 text-right font-bold', style: { color: won ? 'var(--up)' : 'var(--down)' } },
+                  (s.pnl >= 0 ? '+' : '') + '$' + s.pnl.toFixed(2))
+              );
+            })
+          )
+        )
+      );
+    }
+
+    function MetricsPanel(props) {
+      var m = props.metrics || {};
+      if (!m.trade_count) return null;
+      var items = [
+        ['Profit Factor', m.profit_factor != null ? m.profit_factor.toFixed(2) : '--'],
+        ['Avg Win', m.avg_win != null ? '$' + m.avg_win.toFixed(2) : '--'],
+        ['Avg Loss', m.avg_loss != null ? '$' + m.avg_loss.toFixed(2) : '--'],
+        ['Max Win', m.max_win != null ? '$' + m.max_win.toFixed(2) : '--'],
+        ['Max Loss', m.max_loss != null ? '$' + m.max_loss.toFixed(2) : '--'],
+        ['Max Drawdown', m.max_drawdown != null ? '$' + m.max_drawdown.toFixed(2) + ' (' + m.max_drawdown_pct.toFixed(1) + '%)' : '--'],
+      ];
+      return h('div', { className: 'rounded-lg p-4', style: { background: 'var(--card)', border: '1px solid var(--border)' } },
+        h('h3', { className: 'text-sm font-bold mb-3', style: { color: 'var(--text-dim)' } }, 'Performance Metrics'),
+        h('div', { className: 'grid grid-cols-2 md:grid-cols-3 gap-3' },
+          items.map(function(item, i) {
+            return h('div', { key: i },
+              h('div', { className: 'text-xs', style: { color: 'var(--text-dim)' } }, item[0]),
+              h('div', { className: 'text-sm font-mono font-medium' }, item[1])
+            );
+          })
+        )
+      );
+    }
+
+    function PnlBar(props) {
+      var pnl = props.pnl || 0;
+      var initial = props.initial || 10000;
+      var pct = initial > 0 ? (pnl / initial * 100) : 0;
+      var isUp = pnl >= 0;
+      var barColor = isUp ? 'var(--up)' : 'var(--down)';
+      var width = Math.min(Math.abs(pct), 50);
+
+      return h('div', { className: 'rounded-lg p-3', style: { background: 'var(--card)', border: '1px solid var(--border)' } },
+        h('div', { className: 'flex justify-between items-center mb-2' },
+          h('span', { className: 'text-xs', style: { color: 'var(--text-dim)' } }, 'Return'),
+          h('span', { className: 'text-sm font-mono font-bold', style: { color: barColor } },
+            (isUp ? '+' : '') + pct.toFixed(2) + '%')
+        ),
+        h('div', { style: { height: 6, background: 'rgba(255,255,255,0.05)', borderRadius: 3, position: 'relative', overflow: 'hidden' } },
+          h('div', { style: {
+            position: 'absolute', top: 0, height: '100%', borderRadius: 3,
+            left: isUp ? '50%' : (50 - width) + '%',
+            width: width + '%',
+            background: barColor, opacity: 0.7, transition: 'all 0.3s ease',
+          }})
+        )
+      );
+    }
+
+    // ---- App ----
+    function App() {
+      var store = useRef(usePaperFeed()).current;
+      var state = useStore(store);
+
+      return h('div', { className: 'min-h-screen' },
+        h(Header, { state: state }),
+        h('main', { className: 'max-w-7xl mx-auto px-4 py-6 space-y-4' },
+          h('div', { className: 'flex items-center justify-between flex-wrap gap-3' },
+            h('div', null,
+              h('span', { className: 'text-sm font-mono', style: { color: 'var(--text-dim)' } },
+                state.strategy ? 'Strategy: ' : '',
+                h('span', { style: { color: 'var(--neutral)' } }, state.strategy || '')),
+            ),
+            h(Controls, { state: state })
+          ),
+          h(PnlBar, { pnl: state.netPnl, initial: state.initialBankroll || 10000 }),
+          h(Dashboard, { state: state }),
+          h('div', { className: 'grid grid-cols-1 lg:grid-cols-2 gap-4' },
+            h('div', { className: 'space-y-4' },
+              h('h3', { className: 'text-sm font-bold', style: { color: 'var(--text-dim)' } }, 'Open Positions'),
+              h(Positions, { positions: state.positions }),
+              h('h3', { className: 'text-sm font-bold mt-4', style: { color: 'var(--text-dim)' } }, 'Settlements'),
+              h(Settlements, { settlements: state.settlements })
+            ),
+            h('div', { className: 'space-y-4' },
+              h('h3', { className: 'text-sm font-bold', style: { color: 'var(--text-dim)' } }, 'Trade Log'),
+              h(TradeLog, { trades: state.trades }),
+              h(MetricsPanel, { metrics: state.metrics })
+            )
+          )
+        )
+      );
+    }
+
+    ReactDOM.createRoot(document.getElementById('root')).render(h(App));
+  </script>
 </body>
 </html>

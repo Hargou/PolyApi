@@ -6,7 +6,7 @@ All strategies implement BaseStrategy.evaluate() -> Signal.
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Literal, Optional
+from typing import Dict, List, Literal, Optional, Tuple
 
 
 class ExitPolicy(Enum):
@@ -43,6 +43,20 @@ class MarketState:
     elapsed_sec: int
     remaining_sec: int
     ts: int                 # current event timestamp (unix ms)
+
+    # Microstructure (populated when book data available)
+    bids: List[Tuple[float, float]] = field(default_factory=list)
+    asks: List[Tuple[float, float]] = field(default_factory=list)
+    bid_size_at_best: float = 0.0
+    ask_size_at_best: float = 0.0
+    microprice: float = 0.0         # depth-weighted fair value
+    obi: float = 0.0               # order book imbalance [-1, +1]
+
+    # Cross-asset (spot returns for other assets in this window)
+    other_spot_returns: Dict[str, float] = field(default_factory=dict)
+
+    # Fee info at current price
+    effective_fee_rate: float = 0.0  # fee as % of notional at midpoint
 
 
 @dataclass

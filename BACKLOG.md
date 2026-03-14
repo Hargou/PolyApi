@@ -48,7 +48,7 @@
 
 - [x] **5.1** `data/live_source.py` — LiveSource: chains engine callbacks, translates CLOB WS events (book, best_bid_ask, price_change, last_trade_price), polls L2 books via REST, auto-detects resolutions
 - [x] **5.2** `cli/paper.py` — CLI: `python -m cli.paper --strategy spot_momentum --duration 3600 --book-poll 5`. Status line every 30s, trade log + settlement log on exit.
-- [ ] **5.3** Wire paper trading status into `/paper` page (optional — show live PnL via WebSocket)
+- [x] **5.3** `/paper` page: live PnL dashboard via `/ws/paper` WebSocket, start/stop controls, positions, trade log, settlements, metrics panel. API: `POST /api/paper/start`, `POST /api/paper/stop`, `GET /api/paper/state`
 
 ## Phase 6: Metrics & Polish — DONE
 

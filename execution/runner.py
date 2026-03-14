@@ -87,6 +87,9 @@ class StrategyRunner:
         sym = f"{info.asset.lower()}usdt"
         if sym in self._spot_prices:
             self._spot_at_window_start[info.condition_id] = self._spot_prices[sym]
+        # Snapshot all spot prices for cross-asset correlation
+        for s, p in self._spot_prices.items():
+            self._spot_at_window_start[f"_global_{s}"] = p
 
     def _handle_clob(self, snap: ClobSnapshot):
         """Process a CLOB snapshot: update book, evaluate strategy if we have a market."""
@@ -188,6 +191,31 @@ class StrategyRunner:
 
         spot_return = ((spot - spot_start) / spot_start * 10_000) if spot_start > 0 else 0.0
 
+        # Microstructure: best-level sizes, microprice, OBI
+        bid_size_best = float(snap.bids[0][1]) if snap.bids else 0.0
+        ask_size_best = float(snap.asks[0][1]) if snap.asks else 0.0
+
+        if bid_size_best + ask_size_best > 0:
+            microprice = (snap.best_bid * ask_size_best + snap.best_ask * bid_size_best) / (bid_size_best + ask_size_best)
+        else:
+            microprice = midpoint
+
+        total_depth = bid_depth + ask_depth
+        obi = (bid_depth - ask_depth) / total_depth if total_depth > 0 else 0.0
+
+        # Cross-asset spot returns
+        other_returns = {}
+        for other_sym, other_spot in self._spot_prices.items():
+            other_asset = other_sym.replace("usdt", "").upper()
+            if other_asset != market.asset:
+                other_start = self._spot_at_window_start.get(
+                    f"_global_{other_sym}", other_spot)
+                if other_start > 0:
+                    other_returns[other_asset] = ((other_spot - other_start) / other_start * 10_000)
+
+        # Effective fee rate at midpoint
+        eff_fee = 0.25 * (midpoint * (1.0 - midpoint)) ** 2 if 0 < midpoint < 1 else 0.0
+
         return MarketState(
             condition_id=market.condition_id,
             yes_token_id=market.yes_token_id,
@@ -208,6 +236,14 @@ class StrategyRunner:
             elapsed_sec=elapsed,
             remaining_sec=remaining,
             ts=snap.ts,
+            bids=snap.bids,
+            asks=snap.asks,
+            bid_size_at_best=bid_size_best,
+            ask_size_at_best=ask_size_best,
+            microprice=microprice,
+            obi=obi,
+            other_spot_returns=other_returns,
+            effective_fee_rate=eff_fee,
         )
 
     def _build_summary(self, elapsed_sec: float) -> dict:

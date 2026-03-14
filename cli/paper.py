@@ -21,6 +21,9 @@ import time
 
 from strategies.spot_momentum import SpotMomentumStrategy
 from strategies.benchmarks import AlwaysYesStrategy, AlwaysNoStrategy, RandomStrategy
+from strategies.quant_models import QuantModelsStrategy
+from strategies.fee_extremes import FeeExtremesStrategy
+from strategies.time_decay import TimeDecayStrategy
 from execution.runner import StrategyRunner
 from execution.portfolio import Portfolio
 from execution.risk_engine import RiskConfig
@@ -38,6 +41,9 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 STRATEGIES = {
+    "quant_models": lambda: QuantModelsStrategy(),
+    "fee_extremes": lambda: FeeExtremesStrategy(),
+    "time_decay": lambda: TimeDecayStrategy(),
     "spot_momentum": lambda: SpotMomentumStrategy(),
     "always_yes": lambda: AlwaysYesStrategy(),
     "always_no": lambda: AlwaysNoStrategy(),

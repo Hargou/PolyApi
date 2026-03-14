@@ -16,6 +16,7 @@ from fastapi.staticfiles import StaticFiles
 from engines.price_engine import PriceEngine
 from engines.market_engine import MarketEngine
 from engines.feed import Feed
+from engines.paper_session import PaperSession
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 log = logging.getLogger(__name__)
@@ -26,6 +27,7 @@ CLOB = "https://clob.polymarket.com"
 feed = Feed()
 price_engine = PriceEngine()
 market_engine = MarketEngine()
+paper_session = PaperSession()
 
 # Track background tasks to avoid fire-and-forget warnings
 _bg_tasks: set[asyncio.Task] = set()
@@ -142,3 +144,45 @@ async def get_clob_market(condition_id: str):
         r = await client.get(f"{CLOB}/markets/{condition_id}")
         r.raise_for_status()
         return r.json()
+
+
+# -- Paper Trading endpoints --
+
+@app.websocket("/ws/paper")
+async def ws_paper(ws: WebSocket):
+    """WebSocket for live paper trading updates."""
+    await paper_session.connect(ws)
+    try:
+        while True:
+            await ws.receive_text()
+    except WebSocketDisconnect:
+        pass
+    finally:
+        paper_session.disconnect(ws)
+
+
+@app.post("/api/paper/start")
+async def start_paper(strategy: str = "spot_momentum", bankroll: float = 10000.0,
+                      book_poll: float = 10.0):
+    """Start a paper trading session."""
+    result = await paper_session.start(
+        strategy_name=strategy,
+        bankroll=bankroll,
+        book_poll=book_poll,
+        price_engine=price_engine,
+        market_engine=market_engine,
+    )
+    return result
+
+
+@app.post("/api/paper/stop")
+async def stop_paper():
+    """Stop the paper trading session."""
+    await paper_session.stop()
+    return {"status": "stopped"}
+
+
+@app.get("/api/paper/state")
+async def paper_state():
+    """Get current paper trading state."""
+    return paper_session._build_snapshot()
