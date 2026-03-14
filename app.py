@@ -6,7 +6,6 @@ Single /ws/feed endpoint pushes unified stream to browser.
 
 import asyncio
 import logging
-import time
 from contextlib import asynccontextmanager
 
 import httpx
@@ -28,13 +27,23 @@ feed = Feed()
 price_engine = PriceEngine()
 market_engine = MarketEngine()
 
+# Track background tasks to avoid fire-and-forget warnings
+_bg_tasks: set[asyncio.Task] = set()
+
+
+def _create_bg_task(coro):
+    """Create a tracked background task that cleans up after itself."""
+    task = asyncio.create_task(coro)
+    _bg_tasks.add(task)
+    task.add_done_callback(_bg_tasks.discard)
+
 
 # -- Engine callbacks wired to feed --
 
 def on_price(sym: str, value: float, ts: int):
     """Called by PriceEngine on each spot price tick."""
     feed.update_snapshot_prices(price_engine.prices)
-    asyncio.create_task(feed.broadcast({
+    _create_bg_task(feed.broadcast({
         "type": "price",
         "symbol": sym,
         "value": value,
@@ -44,7 +53,7 @@ def on_price(sym: str, value: float, ts: int):
 
 def on_market_event(data):
     """Called by MarketEngine for each CLOB WebSocket message."""
-    asyncio.create_task(feed.broadcast({
+    _create_bg_task(feed.broadcast({
         "type": "clob",
         "data": data,
     }))
@@ -53,7 +62,7 @@ def on_market_event(data):
 def on_markets_update(markets: list):
     """Called by MarketEngine when the market list is refreshed."""
     feed.update_snapshot_markets(markets)
-    asyncio.create_task(feed.broadcast({
+    _create_bg_task(feed.broadcast({
         "type": "markets_update",
         "markets": markets,
     }))
@@ -75,6 +84,8 @@ async def lifespan(app: FastAPI):
     yield
     await price_engine.stop()
     await market_engine.stop()
+    if _bg_tasks:
+        await asyncio.gather(*_bg_tasks, return_exceptions=True)
     log.info("All engines stopped")
 
 

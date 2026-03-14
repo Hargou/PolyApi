@@ -24,7 +24,9 @@
 polyapi/
 ├── app.py                          # FastAPI application — wires engines, defines routes
 ├── requirements.txt                # Python dependencies
-├── .gitignore                      # Git ignore rules
+├── GOAL.md                         # Project goals and plan
+├── RESEARCH.md                     # Fee model, risk limits, data sources research
+├── ARCHITECTURE.md                 # This file — how the live dashboard works
 │
 ├── engines/                        # Server-side data engines
 │   ├── __init__.py
@@ -34,18 +36,23 @@ polyapi/
 │
 ├── static/                         # Frontend assets served by FastAPI
 │   ├── index.html                  # Main dashboard (React 18, single-file SPA)
+│   ├── paper.html                  # Strategy Lab placeholder
 │   └── graph-dev.html              # Development graph tool
 │
 ├── tools/                          # Standalone CLI utilities
 │   └── polymarket_ws.py            # Polymarket WebSocket explorer (events, CLOB, sports)
 │
-└── tests/                          # Test files (Python + JavaScript)
-    ├── test_clob.py
-    ├── test_kalshi.py
-    ├── test_kraken_spot.py
-    ├── test_spot_sources.py
-    ├── test_book_parse.js
-    └── ... (18 files total)
+├── tests/                          # Test/exploration scripts
+│   ├── test_kalshi*.py             # Kalshi API exploration (5 files)
+│   ├── test_kraken_spot.py         # Kraken WS stress test
+│   ├── test_spot_sources.py        # Spot price source benchmark
+│   ├── test_rtds.py                # Quick spot price test
+│   ├── test_debug_house.py         # Debug utility
+│   └── test_book_parse.js          # Order book parsing unit test
+│
+└── docs/                           # Reference documentation
+    ├── BACKTEST_PAPER_ARCHITECTURE.md  # Backtest/paper trading design
+    └── QUANT_ENGINE_RESEARCH.md        # Data structures, microstructure research
 ```
 
 ### What each directory is for
