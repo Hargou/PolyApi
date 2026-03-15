@@ -1,14 +1,13 @@
-# PolyApi Data Sync — incremental pull from VPS
-# Only downloads new or updated files (fills in gaps)
+# PolyApi Data Sync — pull from VPS
 #
 # Usage:
-#   .\collector\sync_data.ps1 -VpsHost 123.45.67.89
-#   .\collector\sync_data.ps1 -VpsHost 123.45.67.89 -Replay
+#   .\collector\sync_data.ps1
+#   .\collector\sync_data.ps1 -Replay
 
 param(
-    [string]$VpsHost = "YOUR_VPS_IP",
+    [string]$VpsHost = "143.110.129.50",
     [string]$VpsUser = "root",
-    [string]$VpsDataDir = "/root/polyapi/data_store",
+    [string]$VpsDataDir = "/home/openclaw/polyapi/data_store",
     [switch]$Replay
 )
 
@@ -20,74 +19,30 @@ if (-not (Test-Path $LocalDataDir)) {
 }
 
 Write-Host ""
-Write-Host "=== PolyApi Data Sync (incremental) ===" -ForegroundColor Cyan
+Write-Host "=== PolyApi Data Sync ===" -ForegroundColor Cyan
 Write-Host "  VPS:   ${VpsUser}@${VpsHost}:${VpsDataDir}"
 Write-Host "  Local: $LocalDataDir"
 Write-Host ""
+Write-Host "Downloading..." -ForegroundColor Yellow
 
-# Get list of files on VPS with sizes
-Write-Host "Checking VPS for files..." -ForegroundColor Yellow
-$vpsFiles = ssh "${VpsUser}@${VpsHost}" "ls -l ${VpsDataDir}/*.jsonl 2>/dev/null | awk '{print \`$NF, \`$5}'"
+scp "${VpsUser}@${VpsHost}:${VpsDataDir}/*.jsonl" "$LocalDataDir/"
 
-if (-not $vpsFiles) {
-    Write-Host "No files found on VPS." -ForegroundColor Red
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "ERROR: scp failed." -ForegroundColor Red
     exit 1
-}
-
-# Compare and download only what's missing or smaller locally
-$downloaded = 0
-$skipped = 0
-
-foreach ($line in $vpsFiles -split "`n") {
-    $parts = $line.Trim() -split "\s+"
-    if ($parts.Count -lt 2) { continue }
-
-    $remotePath = $parts[0]
-    $remoteSize = [long]$parts[1]
-    $fileName = Split-Path $remotePath -Leaf
-    $localPath = Join-Path $LocalDataDir $fileName
-
-    $needsDownload = $false
-
-    if (-not (Test-Path $localPath)) {
-        # File doesn't exist locally
-        $needsDownload = $true
-        $reason = "new"
-    } else {
-        $localSize = (Get-Item $localPath).Length
-        if ($remoteSize -gt $localSize) {
-            # VPS has more data (today's file still being written to)
-            $needsDownload = $true
-            $reason = "updated (+$([math]::Round(($remoteSize - $localSize) / 1KB, 1))KB)"
-        }
-    }
-
-    if ($needsDownload) {
-        Write-Host "  Downloading $fileName ($reason)..." -ForegroundColor Green
-        scp "${VpsUser}@${VpsHost}:${remotePath}" "$localPath"
-        $downloaded++
-    } else {
-        $skipped++
-    }
 }
 
 # Summary
 $files = Get-ChildItem "$LocalDataDir\*.jsonl" -ErrorAction SilentlyContinue
 $fileCount = $files.Count
-$totalLines = 0
-foreach ($f in $files) {
-    $totalLines += (Get-Content $f.FullName | Measure-Object -Line).Lines
-}
 $totalMB = [math]::Round(($files | Measure-Object -Property Length -Sum).Sum / 1MB, 1)
 
 Write-Host ""
 Write-Host "=== Sync Complete ===" -ForegroundColor Green
-Write-Host "  Downloaded: $downloaded files"
-Write-Host "  Skipped:    $skipped files (already up to date)"
-Write-Host "  Total:      $fileCount days, $totalLines events, ${totalMB}MB"
+Write-Host "  Files: $fileCount days"
+Write-Host "  Size:  ${totalMB}MB"
 Write-Host ""
 
-# Optional replay
 if ($Replay) {
     Write-Host "Running replay..." -ForegroundColor Yellow
     Push-Location $ProjectDir

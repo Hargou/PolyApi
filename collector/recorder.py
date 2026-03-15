@@ -41,6 +41,27 @@ CLOB_WS = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
 GAMMA_API = "https://gamma-api.polymarket.com"
 CLOB_API = "https://clob.polymarket.com"
 
+# Chainlink on-chain price feeds (Polygon mainnet)
+# These are the oracle feeds Polymarket uses to resolve 5-min Up/Down markets
+POLYGON_RPC = "https://polygon-bor-rpc.publicnode.com"
+CHAINLINK_FEEDS = {
+    "btcusdt": "0xc907E116054Ad103354f2D350FD2514433D57F6f",
+    "ethusdt": "0xF9680D99D6C9589e2a93a78A04A279e509205945",
+    "solusdt": "0x10C8264C0935b3B9870013e057f330Ff3e9C56dC",
+}
+CHAINLINK_ABI = json.loads(
+    '[{"inputs":[],"name":"latestRoundData","outputs":'
+    '[{"internalType":"uint80","name":"roundId","type":"uint80"},'
+    '{"internalType":"int256","name":"answer","type":"int256"},'
+    '{"internalType":"uint256","name":"startedAt","type":"uint256"},'
+    '{"internalType":"uint256","name":"updatedAt","type":"uint256"},'
+    '{"internalType":"uint80","name":"answeredInRound","type":"uint80"}],'
+    '"stateMutability":"view","type":"function"},'
+    '{"inputs":[],"name":"decimals","outputs":'
+    '[{"internalType":"uint8","name":"","type":"uint8"}],'
+    '"stateMutability":"view","type":"function"}]'
+)
+
 PRODUCTS = ["BTC-USD", "ETH-USD", "SOL-USD"]
 ASSETS = ["btc", "eth", "sol"]
 PRODUCT_MAP = {"BTC-USD": "btcusdt", "ETH-USD": "ethusdt", "SOL-USD": "solusdt"}
@@ -69,6 +90,12 @@ class DataRecorder:
         self._clob_count = 0
         self._market_count = 0
         self._resolution_count = 0
+        self._chainlink_count = 0
+
+        # Chainlink web3 (lazy init)
+        self._w3 = None
+        self._cl_contracts = {}
+        self._cl_decimals = {}
 
     async def start(self):
         """Start all recording streams."""
@@ -77,6 +104,7 @@ class DataRecorder:
 
         tasks = [
             asyncio.create_task(self._spot_stream()),
+            asyncio.create_task(self._chainlink_loop()),
             asyncio.create_task(self._discovery_loop()),
             asyncio.create_task(self._clob_stream()),
             asyncio.create_task(self._resolution_loop()),
@@ -91,8 +119,8 @@ class DataRecorder:
             self._running = False
             if self._file:
                 self._file.close()
-            log.info("Recorder stopped. Total: spot=%d clob=%d markets=%d resolutions=%d",
-                     self._spot_count, self._clob_count, self._market_count, self._resolution_count)
+            log.info("Recorder stopped. Total: spot=%d chainlink=%d clob=%d markets=%d resolutions=%d",
+                     self._spot_count, self._chainlink_count, self._clob_count, self._market_count, self._resolution_count)
 
     def stop(self):
         self._running = False
@@ -159,6 +187,73 @@ class DataRecorder:
                 log.warning("Coinbase disconnected: %s (reconnect in %ds)", e, backoff)
                 await asyncio.sleep(backoff)
                 backoff = min(backoff * 2, 30)
+
+    # ---- Stream 1b: Chainlink On-Chain Price Feeds ----
+
+    def _init_chainlink(self):
+        """Initialize web3 connection and Chainlink contracts (lazy)."""
+        if self._w3 is not None:
+            return True
+        try:
+            from web3 import Web3
+            self._w3 = Web3(Web3.HTTPProvider(POLYGON_RPC, request_kwargs={"timeout": 10}))
+            if not self._w3.is_connected():
+                log.warning("Chainlink: Polygon RPC not connected")
+                self._w3 = None
+                return False
+            for sym, addr in CHAINLINK_FEEDS.items():
+                contract = self._w3.eth.contract(
+                    address=Web3.to_checksum_address(addr), abi=CHAINLINK_ABI
+                )
+                self._cl_contracts[sym] = contract
+                self._cl_decimals[sym] = contract.functions.decimals().call()
+            log.info("Chainlink connected (Polygon on-chain feeds)")
+            return True
+        except ImportError:
+            log.warning("Chainlink: web3 not installed, skipping oracle feed")
+            return False
+        except Exception as e:
+            log.warning("Chainlink init failed: %s", e)
+            self._w3 = None
+            return False
+
+    async def _chainlink_loop(self):
+        """Poll Chainlink on-chain price feeds every 5 seconds."""
+        # Wait a bit for startup
+        await asyncio.sleep(3)
+
+        while self._running:
+            try:
+                if not self._init_chainlink():
+                    await asyncio.sleep(30)
+                    continue
+
+                for sym, contract in self._cl_contracts.items():
+                    try:
+                        rd = contract.functions.latestRoundData().call()
+                        decimals = self._cl_decimals[sym]
+                        price = rd[1] / (10 ** decimals)
+                        updated_at = rd[3]
+
+                        ts = int(time.time() * 1000)
+                        await self._write_event({
+                            "t": ts,
+                            "type": "chainlink",
+                            "sym": sym,
+                            "price": price,
+                            "updated_at": updated_at,
+                            "round_id": rd[0],
+                        })
+                        self._chainlink_count += 1
+                    except Exception:
+                        pass
+
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                log.warning("Chainlink poll error: %s", e)
+
+            await asyncio.sleep(5)
 
     # ---- Stream 2: Market Discovery ----
 
@@ -391,8 +486,8 @@ class DataRecorder:
         """Print status every 5 minutes."""
         while self._running:
             await asyncio.sleep(300)
-            log.info("STATUS: spot=%d clob=%d markets=%d resolved=%d lines=%d active=%d",
-                     self._spot_count, self._clob_count, self._market_count,
+            log.info("STATUS: spot=%d chainlink=%d clob=%d markets=%d resolved=%d lines=%d active=%d",
+                     self._spot_count, self._chainlink_count, self._clob_count, self._market_count,
                      self._resolution_count, self._write_count, len(self._known_markets))
 
 

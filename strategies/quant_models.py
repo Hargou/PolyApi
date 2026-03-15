@@ -135,35 +135,52 @@ class QuantModelsStrategy(BaseStrategy):
         if state.spread_bps > cfg.max_spread_bps:
             return Signal("hold", 0, 0, f"spread {state.spread_bps:.0f}bps")
 
-        # Track spot prices for vol estimation
+        # Track spot prices for vol estimation (capped for performance)
         hist = self._spot_history.setdefault(state.condition_id, [])
-        hist.append(state.spot_price)
+        if state.spot_price > 0:
+            hist.append(state.spot_price)
+            if len(hist) > 200:
+                self._spot_history[state.condition_id] = hist[-200:]
+                hist = self._spot_history[state.condition_id]
 
-        # -- Model 1: Brownian Motion P(up) --
-        p_brownian = self._brownian_model(state, hist)
+        # -- Models: each returns (p, weight) or None if no data --
+        models = [
+            ("B", cfg.w_brownian, self._brownian_model(state, hist)),
+            ("M", cfg.w_microprice, self._microprice_model(state)),
+            ("O", cfg.w_obi, self._obi_model(state)),
+            ("X", cfg.w_cross_asset, self._cross_asset_model(state)),
+            ("T", cfg.w_time_decay, self._time_decay_model(state)),
+        ]
 
-        # -- Model 2: Microprice divergence --
-        p_microprice = self._microprice_model(state)
+        # Only average models that have real signal (not None)
+        total_w = 0.0
+        weighted_sum = 0.0
+        model_vals = {}
+        for name, weight, p in models:
+            if p is not None:
+                total_w += weight
+                weighted_sum += weight * p
+                model_vals[name] = p
+            else:
+                model_vals[name] = None
 
-        # -- Model 3: Order Book Imbalance --
-        p_obi = self._obi_model(state)
+        active_count = sum(1 for v in model_vals.values() if v is not None)
+        if total_w == 0:
+            return Signal("hold", 0, 0, "no active models")
+        # Require 2+ models, OR 1 model with very strong conviction
+        if active_count < 2:
+            strongest = max((abs(v - 0.5) for v in model_vals.values() if v is not None), default=0)
+            if strongest < 0.20:
+                return Signal("hold", 0, 0, f"weak single model ({active_count}/5, conv={strongest:.2f})")
 
-        # -- Model 4: Cross-Asset Lead-Lag --
-        p_cross = self._cross_asset_model(state)
+        p_hat = weighted_sum / total_w
 
-        # -- Model 5: Time Decay --
-        p_time = self._time_decay_model(state)
-
-        # -- Combine: weighted average --
-        total_w = (cfg.w_brownian + cfg.w_microprice + cfg.w_obi +
-                   cfg.w_cross_asset + cfg.w_time_decay)
-        p_hat = (
-            cfg.w_brownian * p_brownian +
-            cfg.w_microprice * p_microprice +
-            cfg.w_obi * p_obi +
-            cfg.w_cross_asset * p_cross +
-            cfg.w_time_decay * p_time
-        ) / total_w
+        # Extract for rationale
+        p_brownian = model_vals.get("B")
+        p_microprice = model_vals.get("M")
+        p_obi = model_vals.get("O")
+        p_cross = model_vals.get("X")
+        p_time = model_vals.get("T")
 
         # Clamp
         p_hat = max(0.02, min(0.98, p_hat))
@@ -209,9 +226,11 @@ class QuantModelsStrategy(BaseStrategy):
             return Signal("hold", 0, 0, f"kelly=0 p={p_hat:.3f}",
                           p_hat=p_hat, ev_bps=divergence_bps)
 
+        def _fmt(v):
+            return f"{v:.2f}" if v is not None else "-"
         rationale = (f"p={p_hat:.3f} mkt={p_market:.3f} div={divergence_bps:.0f}bp "
-                     f"[B={p_brownian:.2f} M={p_microprice:.2f} O={p_obi:.2f} "
-                     f"X={p_cross:.2f} T={p_time:.2f}]")
+                     f"[B={_fmt(p_brownian)} M={_fmt(p_microprice)} O={_fmt(p_obi)} "
+                     f"X={_fmt(p_cross)} T={_fmt(p_time)}]")
 
         return Signal(
             action=action,
@@ -222,21 +241,26 @@ class QuantModelsStrategy(BaseStrategy):
             ev_bps=divergence_bps,
         )
 
-    def _brownian_model(self, state: MarketState, hist: List[float]) -> float:
+    def _brownian_model(self, state: MarketState, hist: List[float]) -> Optional[float]:
         """
         P(up) from Brownian motion: Phi(return / (sigma * sqrt(remaining)))
 
-        Uses realized vol if enough ticks, otherwise baseline assumption.
+        Returns None if we don't have enough spot data for a meaningful signal.
         """
         cfg = self.config
         remaining = max(state.remaining_sec, 1)
 
+        # Need actual spot movement to form an opinion
+        if abs(state.spot_return_bps) < 1.0 and len(hist) < cfg.vol_min_ticks:
+            return None  # no meaningful spot data yet
+
         # Estimate vol from intra-window spot ticks
         if len(hist) >= cfg.vol_min_ticks:
+            recent = hist[-100:]  # cap for performance
             returns = []
-            for i in range(1, len(hist)):
-                if hist[i - 1] > 0:
-                    returns.append((hist[i] - hist[i - 1]) / hist[i - 1] * 10_000)
+            for i in range(1, len(recent)):
+                if recent[i - 1] > 0:
+                    returns.append((recent[i] - recent[i - 1]) / recent[i - 1] * 10_000)
             if returns:
                 mean_r = sum(returns) / len(returns)
                 var = sum((r - mean_r) ** 2 for r in returns) / max(len(returns) - 1, 1)
@@ -252,32 +276,42 @@ class QuantModelsStrategy(BaseStrategy):
         z = state.spot_return_bps / (sigma * math.sqrt(remaining / 60.0))
         return _phi(z)
 
-    def _microprice_model(self, state: MarketState) -> float:
+    def _microprice_model(self, state: MarketState) -> Optional[float]:
         """
         Depth-weighted fair value. Microprice reflects where informed
         participants are placing more size.
-        """
-        if state.microprice > 0:
-            return state.microprice
-        return state.midpoint
 
-    def _obi_model(self, state: MarketState) -> float:
+        Returns None if microprice is just echoing midpoint (no real book data).
+        """
+        if state.microprice > 0 and state.bid_size_at_best > 0 and state.ask_size_at_best > 0:
+            # Only signal if microprice meaningfully differs from midpoint
+            if abs(state.microprice - state.midpoint) > 0.002:
+                return state.microprice
+        return None  # no informative book data
+
+    def _obi_model(self, state: MarketState) -> Optional[float]:
         """
         Order Book Imbalance: persistent bid/ask asymmetry reveals
         informed flow direction.
+
+        Returns None if OBI is negligible (no real asymmetry).
         """
+        if abs(state.obi) < 0.03:
+            return None  # no meaningful imbalance
         adjustment = state.obi * self.config.obi_sensitivity
         p = state.midpoint + adjustment
         return max(0.02, min(0.98, p))
 
-    def _cross_asset_model(self, state: MarketState) -> float:
+    def _cross_asset_model(self, state: MarketState) -> Optional[float]:
         """
         Cross-asset lead-lag: BTC leads ETH/SOL. If BTC moved but
         this asset's market hasn't repriced, there's a mispricing.
+
+        Returns None if no cross-asset data available.
         """
         cfg = self.config
         if not state.other_spot_returns:
-            return state.midpoint  # no data, neutral
+            return None  # no cross-asset data
 
         # Get correlation weights for this asset
         correlations = {
@@ -296,24 +330,36 @@ class QuantModelsStrategy(BaseStrategy):
             total_weight += rho
 
         if total_weight == 0:
-            return state.midpoint
+            return None
 
         leader_signal /= total_weight
+
+        # Need meaningful cross-asset movement to signal
+        if abs(leader_signal) < 5.0:  # less than 5 bps leader return
+            return None
 
         # Map to probability
         return _logistic(leader_signal / cfg.cross_scale)
 
-    def _time_decay_model(self, state: MarketState) -> float:
+    def _time_decay_model(self, state: MarketState) -> Optional[float]:
         """
         As the window progresses, current spot return becomes more predictive.
         p_hat converges to 0 or 1 as remaining time shrinks.
+
+        Returns None early in window when time decay effect is negligible.
         """
         cfg = self.config
         elapsed_frac = min(state.elapsed_sec / 300.0, 1.0)
+        if elapsed_frac < 0.3:
+            return None  # too early for time decay to matter
+
         time_factor = elapsed_frac ** cfg.gamma  # nonlinear: accelerates near expiry
 
         # Time-weighted return signal
         signal = state.spot_return_bps * time_factor
+        if abs(signal) < 5.0:
+            return None  # signal too weak — logistic would just return ~0.50
+
         return _logistic(signal / cfg.time_scale)
 
     def on_market_resolved(self, condition_id: str, outcome: str, pnl: float):

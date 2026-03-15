@@ -33,7 +33,7 @@ fi
 echo "[3/5] Setting up Python environment..."
 python3 -m venv venv
 source venv/bin/activate
-pip install -q httpx websockets
+pip install -q httpx websockets web3
 
 # 4. Create data directory
 echo "[4/5] Creating data directory..."

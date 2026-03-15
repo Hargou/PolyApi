@@ -20,6 +20,10 @@ from strategies.benchmarks import AlwaysYesStrategy, AlwaysNoStrategy, RandomStr
 from strategies.quant_models import QuantModelsStrategy
 from strategies.fee_extremes import FeeExtremesStrategy
 from strategies.time_decay import TimeDecayStrategy
+from strategies.orderbook_imbalance import OrderBookImbalanceStrategy
+from strategies.volatility_regime import VolatilityRegimeStrategy
+from strategies.liquidity_vacuum import LiquidityVacuumStrategy
+from strategies.consensus import ConsensusStrategy
 from strategies.base import BaseStrategy
 from execution.runner import StrategyRunner
 from execution.portfolio import Portfolio
@@ -36,6 +40,10 @@ STRATEGIES = {
     "quant_models": lambda: QuantModelsStrategy(),
     "fee_extremes": lambda: FeeExtremesStrategy(),
     "time_decay": lambda: TimeDecayStrategy(),
+    "orderbook_imbalance": lambda: OrderBookImbalanceStrategy(),
+    "volatility_regime": lambda: VolatilityRegimeStrategy(),
+    "liquidity_vacuum": lambda: LiquidityVacuumStrategy(),
+    "consensus": lambda: ConsensusStrategy(),
     "spot_momentum": lambda: SpotMomentumStrategy(),
     "always_yes": lambda: AlwaysYesStrategy(),
     "always_no": lambda: AlwaysNoStrategy(),

@@ -38,7 +38,14 @@
       "Bash(python -c \"from collector.recorder import DataRecorder; r = DataRecorder\\(\\); print\\('Recorder OK'\\)\" 2>&1)",
       "Bash(python -c \"from collector.replay import load_events, STRATEGIES; print\\('Replay OK, strategies:', list\\(STRATEGIES.keys\\(\\)\\)\\)\" 2>&1)",
       "Bash(wc -l data_store/2026-03-14.jsonl && echo \"---\" && head -5 data_store/2026-03-14.jsonl | python -m json.tool --no-ensure-ascii 2>/dev/null || head -3 data_store/2026-03-14.jsonl)",
-      "WebFetch(domain:api.coinbase.com)"
+      "WebFetch(domain:api.coinbase.com)",
+      "Bash(cd \"C:\\\\Users\\\\karan\\\\OneDrive\\\\Desktop\\\\PolyApi\" && python -m collector.replay data_store/2026-03-14.jsonl --all 2>&1)",
+      "Bash(cd \"C:\\\\Users\\\\karan\\\\OneDrive\\\\Desktop\\\\PolyApi\" && python -m collector.replay data_store/2026-03-14.jsonl --strategy quant_models 2>&1)",
+      "Bash(cd \"C:\\\\Users\\\\karan\\\\OneDrive\\\\Desktop\\\\PolyApi\" && python -m collector.replay data_store/2026-03-14.jsonl --strategy quant_models 2>&1 | grep -E \"\\(BUY|SETTLED|Net PnL|Trades|Win Rate\\)\")",
+      "WebFetch(domain:gamma-api.polymarket.com)",
+      "WebFetch(domain:api.chain.link)",
+      "WebFetch(domain:min-api.cryptocompare.com)",
+      "WebFetch(domain:www.prnewswire.com)"
     ]
   }
 }
