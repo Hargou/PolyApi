@@ -80,6 +80,21 @@ def walk_book(levels, target_size):
 
 This produces slippage estimates within 10-30 bps of real fills -- tight enough to validate strategy edge before risking capital.
 
+### Rust Replay Engine
+
+The backtest engine is written in Rust (PyO3 + maturin) for performance. It reads Parquet data, builds MarketState in Rust, and calls Python strategy callbacks via GIL. Processes 9.2M rows in ~170s.
+
+```bash
+cd rust_engine
+maturin build --release
+pip install target/wheels/poly_engine-*.whl
+```
+
+```python
+import poly_engine
+results = poly_engine.run_replay("data.parquet", callbacks, 10_000.0)
+```
+
 ### Risk Engine
 
 All risk parameters are encapsulated in a single `RiskConfig` dataclass -- every field is sweepable in backtests:
@@ -92,9 +107,9 @@ class RiskConfig:
     max_concurrent_positions: int = 6
     max_loss_per_window: float = 200.0
     max_drawdown_pct: float = 10.0      # circuit breaker
-    max_spread_bps: float = 500.0
-    min_remaining_sec: int = 30
-    max_elapsed_sec: int = 240
+    max_spread_bps: float = 1000.0
+    min_remaining_sec: int = 5
+    max_elapsed_sec: int = 295
     cooldown_after_loss_sec: int = 0
 ```
 
@@ -121,68 +136,119 @@ class BaseStrategy(ABC):
 
 ### Included Strategies
 
-| Strategy | Description |
+**Core insight:** Polymarket's non-linear fee formula means fees are near-zero at price extremes (<0.22 or >0.78) but ~1.56% at midpoint. The only consistently profitable approach is trading at extremes where the fee structure gives a 300+ bps structural edge.
+
+#### Production Strategies
+
+| Strategy | Logic | Backtest PnL |
+|----------|-------|:------------:|
+| `ComboAlphaStrategy` | Fee-extremes gatekeeper + multi-signal (spot momentum, OBI, microprice). Dual mode: CONFIRM (signals agree) or FADE (early-window extreme reversion). Best performer. | **+$460** |
+| `EarlyFadeStrategy` | Fades early-window overreactions at price extremes (<0.22 or >0.78). When price hits extreme in first 90s, buy cheap contracts against the extreme. Fees near-zero at extremes (structural bonus). | **+$291** |
+| `EarlyFadeV2Strategy` | V1 + Bayesian p_hat (replaces logistic), relaxed timing (5-295s), cross-asset momentum, confidence-weighted Kelly. | **+$291** |
+
+#### Research Strategies (active)
+
+| Strategy | Logic | Status |
+|----------|-------|--------|
+| `BinaryReversalStrategy` | Vol regime filter + FADE: skips CALM/STORM, fades NORMAL-vol extremes | Near breakeven (-$16, 70 trades) |
+| `MicrostructureFadeStrategy` | OBI confirms early extreme reversals (first 60s) | Needs real L2 book data from VPS |
+
+#### Archived Strategies (strategies/archive/)
+
+Removed after backtest analysis showed fundamental issues:
+
+| Strategy | Why Archived |
 |----------|-------------|
-| `SpotMomentumStrategy` | Bayesian logistic estimate of P(up) from spot return, fractional Kelly sizing, configurable edge/spread/timing thresholds |
-| `AlwaysYesStrategy` | Benchmark: buys YES on every market |
-| `AlwaysNoStrategy` | Benchmark: buys NO on every market |
-| `RandomStrategy` | Benchmark: random side, seeded RNG for reproducibility |
+| `time_decay` | -$1,070 on 57 trades, 40.4% win, PF 0.55. Unbounded memory growth caused 9x perf regression |
+| `quant_models` | -$712 on 119 trades, 47.1% win, PF 0.79. Composite of weak signals, trades near midpoint |
+| `orderbook_imbalance` | 0 trades — synthetic book data has no meaningful OBI signal |
+| `volatility_regime` | 0 trades — Brownian model at extremes doesn't produce sufficient edge |
+| `spot_momentum` + `v2` | Weak signal, trades at max-fee midpoint, 46.5% win |
+| `snipe` | Prices repriced by T-30s, wide spreads, 10.5% win |
+| `consensus` | Voting on weak signals = false consensus, 8.3% win |
+| `liquidity_vacuum` | Theory backward (book thinning = risk mgmt, not signal) |
+| `quant_models_v2` | Marginal reweight of broken approach |
 
-The spot momentum strategy applies a **logistic transform** of the spot return as a Bayesian P(up) estimate, then sizes using **fractional Kelly criterion**:
+#### Utility Modules
 
-```
-P(up) = logistic(spot_return / scale)
-edge  = P(up) - market_midpoint
-kelly = edge / (P(up) * (1 - P(up))) * fraction
-size  = min(bankroll * kelly / price, max_size)
-```
+| Module | Purpose |
+|--------|---------|
+| `bayesian.py` | Beta-Bernoulli sequential P(up) estimator, confidence-weighted Kelly |
+| `vol_utils.py` | Yang-Zhang OHLC vol estimator, TickVolTracker, implied vol inversion |
+| `benchmarks.py` | AlwaysYes, AlwaysNo, Random baselines |
 
-Only trades when edge exceeds `min_edge_bps` (default 300), spread is under `max_spread_bps` (default 400), and elapsed time is between 30s and 180s.
+#### Key Research Findings
+
+- **Early-window fading is the only profitable approach** — price at extreme in first 90s is often an overreaction
+- **Fee structure provides structural bonus** — fees near-zero at extremes (0.06% at 0.15 vs 1.56% at 0.50)
+- **Relaxed risk limits matter** — loosening min_remaining_sec from 30→5 and max_elapsed_sec from 240→295 gave 5x PnL improvement
+- **Kelly cap dominates sizing** — all strategies hit max_size, making Kelly fraction less relevant than max_size
 
 ---
 
 ## Live Data Pipeline
 
-Three concurrent WebSocket connections feed the paper trading engine:
+Five concurrent data streams feed the engine:
 
 | Source | Protocol | Data |
 |--------|----------|------|
 | Coinbase Exchange | `wss://ws-feed.exchange.coinbase.com` | BTC/ETH/SOL spot prices (sub-second) |
+| Chainlink Price Feeds | Polygon RPC (on-chain, 5s poll) | Oracle prices used for Polymarket resolution |
 | Polymarket CLOB | `wss://ws-subscriptions-clob.polymarket.com/ws/market` | L2 book updates, best bid/ask, trades |
 | Polymarket Gamma | REST polling (60s) | Market discovery, condition IDs, token resolution |
+| Resolution detection | REST polling (30s) | Monitors expired markets for YES/NO outcome |
 
-Additionally, the paper trader polls full L2 order books via REST every N seconds (configurable) to maintain accurate fill simulation depth.
-
-`LiveSource` chains into the existing engine callbacks, translates raw WebSocket events into typed `Event` objects, and pushes them into an `asyncio.Queue`. The paper trading runner consumes events from the same queue interface that the backtest replay source provides.
+**Polymarket resolves via Chainlink Data Streams**, not Coinbase. The ~0.3 bps difference between exchanges can flip outcomes on tight (<5 bps) moves. Chainlink on-chain feeds on Polygon approximate the oracle price for strategy calibration.
 
 ---
 
 ## Usage
 
-### Backtest
+### VPS Data Collection
+
+Record 24/7 tick data on a VPS for backtesting:
+
+```bash
+# Deploy collector to a fresh Ubuntu VPS
+bash collector/setup_vps.sh
+
+# Or manually:
+python -m collector.recorder --output data_store/
+```
+
+The recorder writes JSONL files (one per day) with spot, chainlink, clob, market_info, and resolution events.
+
+### Sync & Replay
+
+```powershell
+# Download data from VPS
+.\collector\sync_data.ps1
+
+# Replay through all 11 strategies
+python -m collector.replay data_store/ --all
+
+# Single strategy
+python -m collector.replay data_store/ --strategy quant_models
+```
+
+### Backtest (API data)
 
 ```bash
 # Single strategy against recent resolved markets
-python -m cli.backtest --strategy spot_momentum --markets 10
+python -m cli.backtest --strategy quant_models --markets 10
 
 # Compare all strategies on the same data
 python -m cli.backtest --all --markets 20
-
-# Custom bankroll
-python -m cli.backtest --strategy spot_momentum --bankroll 50000
 ```
 
 ### Paper Trade
 
 ```bash
-# Default: spot_momentum, unlimited duration
+# Default: quant_models, unlimited duration
 python -m cli.paper
 
 # Run for 1 hour with faster book polling
-python -m cli.paper --strategy spot_momentum --duration 3600 --book-poll 5
-
-# Run a benchmark strategy live
-python -m cli.paper --strategy always_yes --duration 1800
+python -m cli.paper --strategy quant_models --duration 3600 --book-poll 5
 ```
 
 Status line prints every 30 seconds. Full trade log and settlement summary on exit (Ctrl+C).
@@ -204,8 +270,16 @@ Real-time dashboard showing spot prices, active prediction markets, probability 
 polyapi/
 ├── strategies/
 │   ├── base.py                 # BaseStrategy, MarketState, Signal, Position, ExitPolicy
-│   ├── spot_momentum.py        # Bayesian logistic + Kelly sizing strategy
-│   └── benchmarks.py           # AlwaysYes, AlwaysNo, Random baselines
+│   ├── early_fade.py           # Production: fade early-window overreactions at extremes
+│   ├── early_fade_v2.py        # V2: Bayesian signal + relaxed timing + cross-asset
+│   ├── binary_reversal.py      # Vol-weighted FADE: skips CALM/STORM regimes
+│   ├── fee_extremes.py         # Legacy name (same logic as early_fade)
+│   ├── combo_alpha.py          # Production: fee-extremes + multi-signal (FADE + CONFIRM)
+│   ├── microstructure_fade.py  # Research: OBI-confirmed early extreme reversals
+│   ├── bayesian.py             # Beta-Bernoulli P(up) estimator
+│   ├── vol_utils.py            # Yang-Zhang vol, TickVolTracker
+│   ├── benchmarks.py           # AlwaysYes, AlwaysNo, Random baselines
+│   └── archive/               # Archived strategies (see README for reasons)
 │
 ├── execution/
 │   ├── fees.py                 # Non-linear Polymarket fee curve
@@ -221,20 +295,41 @@ polyapi/
 │   ├── replay_source.py        # Historical data -> Event stream for backtesting
 │   └── live_source.py          # WebSocket -> Event stream for paper trading
 │
+├── collector/
+│   ├── recorder.py             # 5-stream data recorder (Coinbase, Chainlink, CLOB, Gamma, resolution)
+│   ├── replay.py               # Replay JSONL data through all 11 strategies
+│   ├── setup_vps.sh            # One-command VPS deployment
+│   ├── sync_data.ps1           # Download data from VPS (PowerShell)
+│   ├── sync_data.sh            # Download data from VPS (Bash)
+│   └── DEPLOY.md               # VPS deployment guide
+│
 ├── analysis/
 │   └── metrics.py              # PnL, win rate, drawdown, profit factor, Sharpe
 │
 ├── cli/
 │   ├── backtest.py             # CLI: python -m cli.backtest
-│   └── paper.py                # CLI: python -m cli.paper
+│   ├── paper.py                # CLI: python -m cli.paper
+│   └── sweep.py                # CLI: parameter sweep across risk configs
 │
 ├── engines/                    # Live dashboard data engines
 │   ├── price_engine.py         # Coinbase WebSocket (spot prices)
 │   ├── market_engine.py        # Market discovery + CLOB WebSocket
+│   ├── paper_session.py        # Paper trading session manager
 │   └── feed.py                 # WebSocket broadcaster to browser clients
 │
 ├── static/                     # React 18 SPA dashboard (no build step)
 │   └── index.html
+│
+├── rust_engine/                # Rust replay engine (PyO3 + maturin)
+│   ├── src/
+│   │   ├── lib.rs              # PyO3 module entry
+│   │   ├── replay.rs           # Main event loop, Parquet reader
+│   │   ├── state.rs            # MarketState construction
+│   │   ├── fill.rs             # L2 order book walking
+│   │   ├── fees.rs             # Non-linear fee calculation
+│   │   └── types.rs            # Data types, RiskConfig
+│   ├── Cargo.toml
+│   └── pyproject.toml
 │
 └── app.py                      # FastAPI server (dashboard + API)
 ```
@@ -276,7 +371,7 @@ polyapi/
 pip install -r requirements.txt
 ```
 
-Dependencies: `fastapi`, `uvicorn`, `httpx`, `websockets`, `jinja2`, `rapidfuzz`
+Dependencies: `fastapi`, `uvicorn`, `httpx`, `websockets`, `jinja2`, `rapidfuzz`, `web3` (optional, for Chainlink feeds)
 
 Python 3.11+
 
@@ -291,8 +386,24 @@ Python 3.11+
 | Non-linear fee model | Polymarket's actual curve, not a flat approximation. Critical for edge detection near 50%. |
 | L2 book walk for fills | Walking real depth is more accurate than midpoint or VWAP assumptions. 10-30 bps error vs real exchange. |
 | Fractional Kelly sizing | Full Kelly is too aggressive for binary outcomes with estimation error. Default 0.25x Kelly. |
-| No VPS required | Historical data from Polymarket's `/prices-history` API (1-min candles). Free, no infrastructure. |
-| Dataclass-only config | `RiskConfig` and `SpotMomentumConfig` are plain dataclasses. Easy to serialize, sweep, and version. |
+| Chainlink oracle alignment | Polymarket resolves via Chainlink, not Coinbase. ~0.3 bps diff can flip tight outcomes. Collector records both. |
+| VPS recorder | 24/7 tick-level data collection (spot, chainlink, CLOB, market info, resolution) for offline replay. |
+| Dataclass-only config | All strategy and risk configs are plain dataclasses. Easy to serialize, sweep, and version. |
+
+---
+
+## Documentation
+
+| Doc | Contents |
+|-----|----------|
+| [docs/research/RESEARCH.md](docs/research/RESEARCH.md) | Strategy research log — findings, leaderboard, planned investigations |
+| [docs/research/PARAM_LOG.md](docs/research/PARAM_LOG.md) | Every parameter change with before/after results |
+| [docs/DATA_PIPELINE.md](docs/DATA_PIPELINE.md) | VPS sync, JSONL→Parquet conversion, Parquet schema, data sizes |
+| [docs/BACKTEST_PAPER_ARCHITECTURE.md](docs/BACKTEST_PAPER_ARCHITECTURE.md) | Detailed backtest design |
+| [docs/QUANT_ENGINE_RESEARCH.md](docs/QUANT_ENGINE_RESEARCH.md) | Data structures, microstructure |
+| [RESEARCH.md](RESEARCH.md) | Fee model, exit policy, risk limits, data sources |
+| [GOAL.md](GOAL.md) | Project goals + implementation plan (6 phases) |
+| [collector/DEPLOY.md](collector/DEPLOY.md) | VPS deployment guide |
 
 ---
 

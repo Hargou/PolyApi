@@ -1,0 +1,68 @@
+NEXT STEPS — PolyApi
+====================
+Last updated: 2026-03-16
+
+CRITICAL: DATA INTEGRITY ISSUE DISCOVERED
+==========================================
+
+Resolution verification (scripts/verify_resolutions.py) found:
+- 94/192 (49%) of recorded resolutions DISAGREE with actual spot price movement
+- spot_at_window_start is captured ~1200s EARLY (at market discovery, not window open)
+- Mean spot snapshot error: 14.2 bps (huge for 5-min binary options)
+- Chainlink vs Coinbase disagree 17.8% of the time on direction
+- Recorder defaults to "yes" too often via CLOB last_trade_price method
+
+ALL BACKTEST PNL NUMBERS ARE UNRELIABLE UNTIL THIS IS FIXED.
+
+STEP 1: Fix Resolution Data (BLOCKING — do this first)
+-------------------------------------------------------
+1a. Fix spot_at_window_start in Rust engine (replay.rs)
+    - Currently: snapshots spot at market_info event time (discovery, ~20min early)
+    - Fix: binary-search spot history for the actual window_start_ts from the slug
+    - The spot data is already in the parquet — just need to look it up at the right time
+
+1b. Fix resolution outcome determination in recorder.py
+    - Currently: CLOB last_trade_price > 0.5 -> YES (unreliable)
+    - Fix: use Chainlink spot at window_end vs Chainlink spot at window_start
+    - Fallback: Coinbase spot if Chainlink unavailable
+    - This is how Polymarket actually resolves: Chainlink Data Streams
+
+1c. Recompute resolutions in preprocessor or add a post-processing step
+    - Option A: Fix in preprocess.py — recompute res_outcome from spot data
+    - Option B: Fix in Rust engine — ignore parquet res_outcome, compute from spot
+    - Option B is cleaner (single source of truth)
+
+1d. Re-run verify_resolutions.py to confirm fix
+    - Target: 0 mismatches (or only on markets with no spot data)
+
+1e. Re-run backtests with corrected data
+    - All strategy PnL numbers will change
+    - Some "profitable" strategies may actually be losing
+    - Update RESEARCH.md leaderboard with corrected numbers
+
+STEP 2: Re-validate All Strategies
+-----------------------------------
+After fix, run full backtest suite and compare before/after:
+- combo_alpha_v2: was +$462, real PnL = ???
+- early_fade: was +$291, real PnL = ???
+- binary_reversal: was +$134, real PnL = ???
+- If everything flips negative, the FADE edge might be an artifact of bad data
+
+STEP 3: OOS Validation (2026-03-15+ data)
+------------------------------------------
+- VPS data downloaded but 2026-03-16.jsonl had permission error
+- Once preprocessed, run strategies on new data as out-of-sample test
+- This is the real test of whether edge persists
+
+STEP 4: Paper Trading (Phase 5)
+-------------------------------
+- Only proceed if strategies are still profitable after data fix
+- Build LiveSource (WebSocket event stream)
+- Wire into same StrategyRunner used by backtest
+
+STEP 5: Strategy Research (only after data is trustworthy)
+----------------------------------------------------------
+- Asset-specific FADE thresholds
+- Adaptive Kelly sizing
+- Spread-based entry timing
+- Real L2 book data from VPS for OBI strategies

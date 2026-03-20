@@ -1,0 +1,15 @@
+[package]
+name = "poly_engine"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "poly_engine"
+crate-type = ["cdylib"]
+
+[dependencies]
+pyo3 = { version = "0.22", features = ["extension-module"] }
+parquet = "54"
+arrow = "54"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

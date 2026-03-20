@@ -1,6 +1,6 @@
 # PolyApi — Research & Design Decisions
 
-**Updated:** 2026-03-13
+**Updated:** 2026-03-14
 **Scope:** Fee model, exit policy, window start price, risk limits, data recording, paper trading engine
 
 ---
@@ -217,37 +217,47 @@ for cfg in configs:
 
 ---
 
-## 5. Historical Data — No VPS Needed
+## 5. Data Collection — VPS Recorder + Chainlink
 
-### What's Available
+### Architecture
 
-| Source | Data Type | Granularity | Coverage | Cost |
-|--------|----------|-------------|----------|------|
-| **Polymarket `/prices-history`** | Price only (no book) | 1-minute candles | Resolved + active markets | Free |
-| **PolyBackTest.com** | **Full L2 order book** | Sub-second | BTC/ETH 5m markets | **Free: last 50 markets** |
-| **PolyTest.io** | **Full L2 order book** | Sub-second | BTC/ETH/SOL/XRP 5m+ | **Free tier available** |
-| **Polymarket `/book`** | Live L2 snapshot | Point-in-time | Current markets only | Free (live only) |
-| **PolymarketData.co** | L2 books, metrics | 1-min resolution | Historical | Paid ($60-360/mo) |
+24/7 VPS recorder captures 5 concurrent streams into daily JSONL files:
 
-### Why No VPS
+| Stream | Source | Frequency | Data |
+|--------|--------|-----------|------|
+| Spot prices | Coinbase WS | Sub-second | BTC/ETH/SOL tick prices |
+| Oracle prices | Chainlink on-chain (Polygon) | Every 5s | BTC/ETH/SOL Chainlink prices |
+| CLOB | Polymarket WS | Real-time | Order book updates, trades, price changes |
+| Market discovery | Polymarket Gamma REST | Every 60s | New 5-min markets, condition IDs |
+| Resolution | Polymarket REST | Every 30s | Outcome detection (YES/NO) |
 
-**PolyBackTest + PolyTest free tiers already capture the data we need.** Full L2 order book depth for recent resolved 5-minute markets across BTC/ETH/SOL. Enough for initial strategy validation without any recording infrastructure.
+### Chainlink vs Coinbase — Resolution Source
 
-Polymarket's `/prices-history` supplements this with 1-minute price candles for signal validation across a larger range of resolved markets (use explicit `startTs`/`endTs` params — `interval=all` returns empty for resolved markets due to a known bug).
+**Polymarket resolves via Chainlink Data Streams, NOT Coinbase.** The ~0.3 bps difference between exchanges can flip outcomes on tight (<5 bps) moves. Our recorder collects both.
 
-### Data Strategy
+Chainlink Price Feed contracts (Polygon mainnet):
+- BTC/USD: `0xc907E116054Ad103354f2D350FD2514433D57F6f`
+- ETH/USD: `0xF9680D99D6C9589e2a93a78A04A279e509205945`
+- SOL/USD: `0x10C8264C0935b3B9870013e057f330Ff3e9C56dC`
 
-| Phase | Source | What You Get | Cost |
-|-------|--------|-------------|------|
-| **Now** | `/prices-history` + PolyBackTest/PolyTest free | Price candles + L2 books for ~50+ markets | Free |
-| **If strategy shows edge** | PolyBackTest Pro | Unlimited L2 history | $19/mo |
-| **Only if needed** | Self-hosted VPS recorder | Custom metrics, guaranteed availability | $5/mo + eng time |
+### Polymarket RTDS — Two Price Feeds
 
-### Price-Only vs L2 Book
+Polymarket's Real-Time Data Socket exposes two separate price channels:
+- `crypto_prices` — sourced from **Binance** (what traders see and trade off)
+- `crypto_prices_chainlink` — sourced from **Chainlink** (what actually resolves)
 
-**Price-only** (`/prices-history`): Good for validating directional signals. Overestimates edge by 50-200+ bps because it ignores spread/slippage.
+This divergence is exploitable: the market prices off Binance, but resolution uses Chainlink.
 
-**L2 book** (PolyBackTest): Required for realistic PnL. 5-min markets have 2-5 cent spreads on a $1 contract — price-only backtesting will systematically overstate profitability.
+### Deployment
+
+VPS: `root@143.110.129.50` (user: openclaw), running as systemd service `polyapi-collector`. See `collector/DEPLOY.md` for full setup guide.
+
+### Data Sync
+
+```powershell
+.\collector\sync_data.ps1                    # download from VPS
+python -m collector.replay data_store/ --all  # replay through all strategies
+```
 
 ### `/prices-history` Endpoint
 
@@ -348,6 +358,81 @@ GET https://clob.polymarket.com/book?token_id={yes_token_id}
 ### Tick Sizes
 
 Market-specific: `0.1`, `0.01`, `0.001`, or `0.0001`
+
+---
+
+## 8. Exploitable Edges (Research, March 2026)
+
+### 8.1 "Flat = YES" Structural Bias
+
+Resolution rule: "Up" if end price **>= start price**. Flat counts as YES. Adds ~0.25% to true P(YES), making fair value ~50.25% not 50.00%. Too small alone (eaten by fees at midpoint), but use as **tiebreaker when models are ambiguous — always lean YES**.
+
+### 8.2 Turn-of-Candle Effect (t-stat > 9)
+
+Academically documented: positive returns of +0.58 bps/min concentrate at minutes 0, 15, 30, 45 of each hour. Windows ending on 15-minute boundaries have a slight YES bias from algorithmic trading triggered by candle closes.
+
+Source: [PMC](https://pmc.ncbi.nlm.nih.gov/articles/PMC10015199/), [ScienceDirect](https://www.sciencedirect.com/science/article/pii/S2405844023014433)
+
+### 8.3 Binance-Chainlink Divergence
+
+Polymarket displays Binance prices (`crypto_prices` RTDS channel) but resolves on Chainlink (`crypto_prices_chainlink`). Traders price off Binance; resolution uses Chainlink. When Binance shows +3 bps but Chainlink shows flat, the market is systematically mispriced. Most valuable when spot return is near zero (<5 bps).
+
+### 8.4 Volatility Regime Filter
+
+5-minute crypto returns are NOT normally distributed — heavy tails, negative skew, volatility clustering. In low-vol periods, direction is nearly random and prices stay near 50c where fees are 1.56%. **Must skip low-vol windows.** In high-vol periods, prices move to extremes where fees are 4x lower.
+
+### 8.5 Fee Dead Zone Avoidance
+
+Trading at prices 0.45-0.55 requires >156 bps of edge just to break even on fees. Most strategies can't produce this. Only trade when prices are at extremes (<0.25 or >0.75) where fees approach zero, OR when divergence is very large (>200 bps).
+
+### 8.6 Last-30-Second Sniping
+
+By T-30s, direction is ~80-85% determined. Polymarket price lags because liquidity thins out. Late-window entry captures the widest divergence between model prediction and stale market price. Combined with the fee advantage at extremes (prices have moved away from 50c by then).
+
+### 8.7 Maker Rebates — Zero Fee + Rebate
+
+Makers pay ZERO fees and receive 20% of taker fees as a rebate. Switching from taker to maker flips a 1.56% headwind into a ~0.3% tailwind. Implementation is harder (limit orders, fill risk in 5-min window) but the largest single edge available.
+
+Source: [Polymarket Maker Rebates](https://docs.polymarket.com/polymarket-learn/trading/maker-rebates-program)
+
+### 8.8 Speed Bump Removal (March 2026)
+
+Polymarket removed its 500ms speed bump. Pure arbitrage (YES+NO < $1) now requires sub-100ms execution, with 73% of arb profits captured by sub-100ms bots. The profitable frontier has shifted to **directional prediction with structural advantages** — our approach.
+
+Source: [Protos](https://protos.com/polymarket-ends-trading-loophole-for-bitcoin-quants/)
+
+### 8.9 Cross-Exchange Lead-Lag
+
+Binance and Coinbase lead smaller exchanges by 1-4 seconds. Coinbase may lead Chainlink by 0.2-1.4s during rapid moves. Practical edge window is 200-800ms — matters most in final 30 seconds when resolution price is being sampled.
+
+### 8.10 Order Flow Signals
+
+- **VPIN** predicts future price jumps with positive serial correlation
+- **OBI** has 2-5% R² for short-term return prediction
+- **Spread widening** signals MM uncertainty — expect a move
+- OBI signals are **most predictive in the final 60 seconds** when liquidity providers step back
+
+### 8.11 Fee Reframing — Win Rate Is King
+
+At 50c, if you're right you win **$0.50 per contract** (100% return). The 1.56% fee is $0.008 — noise compared to the $0.50 payoff. Fee drag only matters when edge is tiny and sizing is small.
+
+**The real question is: can we predict direction with >50% accuracy?** If yes, trading at 50c is the BEST place because the payoff is largest. The bar is >50% accuracy, not >51.56%.
+
+Priority:
+1. **Win rate is king** — focus on prediction accuracy, not fee avoidance
+2. **Big spreads = big payoffs** — 50c markets offer the highest upside per contract
+3. **Still need a real signal** — but confidence in direction matters more than fee optimization
+4. **Vol regime filter still matters** — not to avoid fees, but to avoid truly random periods where accuracy drops below 50%
+
+This shifts the strategy focus from fee-extremes hunting to **Brownian model calibration + vol regime filtering + Chainlink alignment**.
+
+### Why Current Strategies Lose
+
+1. Use Coinbase prices but resolve on Chainlink — systematic prediction error
+2. No vol regime filter — trade random noise in low-vol periods where accuracy < 50%
+3. Brownian model sigma miscalibrated — need to tune from real data
+4. Trading too early (30-180s) — not enough signal to predict accurately
+5. Quant_models Brownian alone bets NO too aggressively on tiny negative returns
 
 ---
 

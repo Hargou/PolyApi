@@ -1,0 +1,14 @@
+C:\Users\karan\OneDrive\Desktop\PolyApi\rust_engine\target\release\deps\serde-3f81592cc0d2aeeb.d: C:\Users\karan\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.228\src\lib.rs C:\Users\karan\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.228\src\integer128.rs C:\Users\karan\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.228\src\private\mod.rs C:\Users\karan\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.228\src\private\de.rs C:\Users\karan\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.228\src\private\ser.rs C:\Users\karan\OneDrive\Desktop\PolyApi\rust_engine\target\release\build\serde-b0e37db4dc50decd\out/private.rs
+
+C:\Users\karan\OneDrive\Desktop\PolyApi\rust_engine\target\release\deps\libserde-3f81592cc0d2aeeb.rlib: C:\Users\karan\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.228\src\lib.rs C:\Users\karan\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.228\src\integer128.rs C:\Users\karan\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.228\src\private\mod.rs C:\Users\karan\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.228\src\private\de.rs C:\Users\karan\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.228\src\private\ser.rs C:\Users\karan\OneDrive\Desktop\PolyApi\rust_engine\target\release\build\serde-b0e37db4dc50decd\out/private.rs
+
+C:\Users\karan\OneDrive\Desktop\PolyApi\rust_engine\target\release\deps\libserde-3f81592cc0d2aeeb.rmeta: C:\Users\karan\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.228\src\lib.rs C:\Users\karan\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.228\src\integer128.rs C:\Users\karan\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.228\src\private\mod.rs C:\Users\karan\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.228\src\private\de.rs C:\Users\karan\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.228\src\private\ser.rs C:\Users\karan\OneDrive\Desktop\PolyApi\rust_engine\target\release\build\serde-b0e37db4dc50decd\out/private.rs
+
+C:\Users\karan\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.228\src\lib.rs:
+C:\Users\karan\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.228\src\integer128.rs:
+C:\Users\karan\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.228\src\private\mod.rs:
+C:\Users\karan\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.228\src\private\de.rs:
+C:\Users\karan\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.228\src\private\ser.rs:
+C:\Users\karan\OneDrive\Desktop\PolyApi\rust_engine\target\release\build\serde-b0e37db4dc50decd\out/private.rs:
+
+# env-dep:OUT_DIR=C:\\Users\\karan\\OneDrive\\Desktop\\PolyApi\\rust_engine\\target\\release\\build\\serde-b0e37db4dc50decd\\out

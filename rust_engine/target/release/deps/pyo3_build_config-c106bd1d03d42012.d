@@ -1,0 +1,14 @@
+C:\Users\karan\OneDrive\Desktop\PolyApi\rust_engine\target\release\deps\pyo3_build_config-c106bd1d03d42012.d: C:\Users\karan\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\pyo3-build-config-0.22.6\src\lib.rs C:\Users\karan\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\pyo3-build-config-0.22.6\src\errors.rs C:\Users\karan\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\pyo3-build-config-0.22.6\src\impl_.rs C:\Users\karan\OneDrive\Desktop\PolyApi\rust_engine\target\release\build\pyo3-build-config-9ccdf7e87f8aaed3\out/pyo3-build-config-file.txt C:\Users\karan\OneDrive\Desktop\PolyApi\rust_engine\target\release\build\pyo3-build-config-9ccdf7e87f8aaed3\out/pyo3-build-config.txt
+
+C:\Users\karan\OneDrive\Desktop\PolyApi\rust_engine\target\release\deps\libpyo3_build_config-c106bd1d03d42012.rlib: C:\Users\karan\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\pyo3-build-config-0.22.6\src\lib.rs C:\Users\karan\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\pyo3-build-config-0.22.6\src\errors.rs C:\Users\karan\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\pyo3-build-config-0.22.6\src\impl_.rs C:\Users\karan\OneDrive\Desktop\PolyApi\rust_engine\target\release\build\pyo3-build-config-9ccdf7e87f8aaed3\out/pyo3-build-config-file.txt C:\Users\karan\OneDrive\Desktop\PolyApi\rust_engine\target\release\build\pyo3-build-config-9ccdf7e87f8aaed3\out/pyo3-build-config.txt
+
+C:\Users\karan\OneDrive\Desktop\PolyApi\rust_engine\target\release\deps\libpyo3_build_config-c106bd1d03d42012.rmeta: C:\Users\karan\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\pyo3-build-config-0.22.6\src\lib.rs C:\Users\karan\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\pyo3-build-config-0.22.6\src\errors.rs C:\Users\karan\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\pyo3-build-config-0.22.6\src\impl_.rs C:\Users\karan\OneDrive\Desktop\PolyApi\rust_engine\target\release\build\pyo3-build-config-9ccdf7e87f8aaed3\out/pyo3-build-config-file.txt C:\Users\karan\OneDrive\Desktop\PolyApi\rust_engine\target\release\build\pyo3-build-config-9ccdf7e87f8aaed3\out/pyo3-build-config.txt
+
+C:\Users\karan\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\pyo3-build-config-0.22.6\src\lib.rs:
+C:\Users\karan\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\pyo3-build-config-0.22.6\src\errors.rs:
+C:\Users\karan\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\pyo3-build-config-0.22.6\src\impl_.rs:
+C:\Users\karan\OneDrive\Desktop\PolyApi\rust_engine\target\release\build\pyo3-build-config-9ccdf7e87f8aaed3\out/pyo3-build-config-file.txt:
+C:\Users\karan\OneDrive\Desktop\PolyApi\rust_engine\target\release\build\pyo3-build-config-9ccdf7e87f8aaed3\out/pyo3-build-config.txt:
+
+# env-dep:CARGO_PKG_VERSION=0.22.6
+# env-dep:OUT_DIR=C:\\Users\\karan\\OneDrive\\Desktop\\PolyApi\\rust_engine\\target\\release\\build\\pyo3-build-config-9ccdf7e87f8aaed3\\out
